@@ -29,10 +29,10 @@ var (
 
 const (
 	// Version is the current version of this driver
-	Version = "1.0"
+	Version = "2.0"
 
 	// ClientID is the id of this client
-	ClientID = "GolangNeo4jBolt/" + Version
+	ClientID = "GoNeo4jBolt/" + Version
 )
 
 // Open calls DialOpen with the default dialer.

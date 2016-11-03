@@ -1,5 +1,5 @@
-# Golang Neo4J Bolt Driver
-[![Build Status](https://travis-ci.org/SermoDigital/bolt.svg?branch=master)](https://travis-ci.org/SermoDigital/bolt) *Tested against Golang 1.4.3 and up*
+# Neo4J Bolt Driver
+[![Build Status](https://travis-ci.org/SermoDigital/bolt.svg?branch=master)](https://travis-ci.org/SermoDigital/bolt) *Tested against Go 1.4.3 and up*
 
 Implements the Neo4J Bolt Protocol specification:
 As of the time of writing this, the current version is v3.1.0-M02
@@ -28,7 +28,7 @@ go get github.com/SermoDigital/bolt
 *_There is much more detailed information in [the godoc](http://godoc.org/github.com/SermoDigital/bolt)_*
 
 This implementation attempts to follow the best practices as per the Bolt
-specification, but also implements compatibility with Golang's `sql.driver` interface.
+specification, but also implements compatibility with Go's `sql.driver` interface.
 
 As such, these interfaces closely match the `sql.driver` interfaces, but they
 also provide Neo4j Bolt specific functionality in addition to the `sql.driver` interface.

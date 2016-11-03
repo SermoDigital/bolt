@@ -75,7 +75,7 @@ func (b *boltReader) ReadByte() (c byte, err error) {
 }
 
 // Decoder decodes a message from the bolt protocol stream. It attempts to
-// support all builtin golang types, when it can be confidently mapped to a data
+// support all builtin Go types, when it can be confidently mapped to a data
 // type from:
 // http://alpha.neohq.net/docs/server-manual/bolt-serialization.html#bolt-packstream-structures
 // (version v3.1.0-M02 at the time of writing this.
