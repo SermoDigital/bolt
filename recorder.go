@@ -3,8 +3,10 @@ package bolt
 import (
 	"bytes"
 	"database/sql/driver"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -188,7 +190,22 @@ func (r *recorder) recordErr(err error, isWrite bool) {
 	event.Completed = true
 }
 
+func (r *recorder) ensureName() {
+	if r.name != "" {
+		return
+	}
+	var buf [16]byte
+	_, err := rand.Read(buf[:])
+	if err != nil {
+		copy(buf[:], "rand_read_failed")
+	}
+	dst := make([]byte, hex.EncodedLen(len(buf)))
+	hex.Encode(dst, buf[:])
+	r.name = string(time.Now().AppendFormat(dst, "2006_01_02_15_04_05"))
+}
+
 func (r *recorder) load() error {
+	r.ensureName()
 	path := filepath.Join("recordings", r.name+".json")
 	file, err := os.OpenFile(path, os.O_RDONLY, 0660)
 	if os.IsNotExist(err) {
@@ -202,6 +219,7 @@ func (r *recorder) load() error {
 }
 
 func (r *recorder) writeRecording() error {
+	r.ensureName()
 	path := filepath.Join("recordings", r.name+".json")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0660)
 	if err != nil {

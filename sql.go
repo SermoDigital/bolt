@@ -2,14 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package sql provides a generic interface around SQL (or SQL-like)
-// databases.
-//
-// The sql package must be used in conjunction with a database driver.
-// See https://golang.org/s/sqldrivers for a list of drivers.
-//
-// For more usage examples, see the wiki page at
-// https://golang.org/s/sqlwiki.
 package bolt
 
 import (
@@ -292,7 +284,7 @@ func openPool(drv opener, dataSourceName string) (*DB, error) {
 	return db, nil
 }
 
-// Open opens a database specified by its database driver name and a
+// OpenPool opens a database specified by its database driver name and a
 // driver-specific data source name, usually consisting of at least a
 // database name and connection information.
 //

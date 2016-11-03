@@ -12,6 +12,8 @@ import (
 	"github.com/SermoDigital/bolt/structures/messages"
 )
 
+// ErrInFailedTransaction is returned when an operation is attempted inside
+// a failed transaction.
 var ErrInFailedTransaction = errors.New("bolt: Could not complete operation in a failed transaction")
 
 func errBadResp(action string, v interface{}) error {
