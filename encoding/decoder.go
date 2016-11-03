@@ -1,0 +1,583 @@
+package encoding
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"io/ioutil"
+
+	"github.com/SermoDigital/bolt/structures/graph"
+	"github.com/SermoDigital/bolt/structures/messages"
+)
+
+type reader interface {
+	io.Reader
+	io.ByteReader
+}
+
+type byteReader struct {
+	io.Reader
+	b []byte
+}
+
+func (b *byteReader) ReadByte() (byte, error) {
+	_, err := io.ReadFull(b.Reader, b.b[0:1])
+	return b.b[0], err
+}
+
+type boltReader struct {
+	r      reader
+	length uint16
+}
+
+func (b *boltReader) next() error {
+	err := binary.Read(b.r, binary.BigEndian, &b.length)
+	if err != nil {
+		return err
+	}
+	if b.length == 0 {
+		return io.EOF
+	}
+	return nil
+}
+
+// Read implements io.Reader.
+func (b *boltReader) Read(p []byte) (n int, err error) {
+	if b.length <= 0 {
+		err = b.next()
+		if err != nil {
+			return 0, err
+		}
+	}
+	if len(p) > int(b.length) {
+		p = p[0:b.length]
+	}
+	n, err = b.r.Read(p)
+	b.length -= uint16(n)
+	return n, err
+}
+
+func (b *boltReader) ReadByte() (c byte, err error) {
+	if b.length <= 0 {
+		err = b.next()
+		if err != nil {
+			return 0, err
+		}
+	}
+	c, err = b.r.ReadByte()
+	if err != nil {
+		return 0, err
+	}
+	b.length--
+	return c, err
+}
+
+// Decoder decodes a message from the bolt protocol stream. It attempts to
+// support all builtin golang types, when it can be confidently mapped to a data
+// type from:
+// http://alpha.neohq.net/docs/server-manual/bolt-serialization.html#bolt-packstream-structures
+// (version v3.1.0-M02 at the time of writing this.
+//
+// Maps and Slices are a special case, where only map[string]interface{} and
+// []interface{} are supported. The interface for maps and slices may be more
+// permissive in the future.
+type Decoder struct {
+	r       *boltReader
+	buf     []byte
+	lastErr error
+}
+
+// NewDecoder creates a new Decoder object
+func NewDecoder(r io.Reader) *Decoder {
+	rr, ok := r.(reader)
+	if ok {
+		return &Decoder{r: &boltReader{r: rr}}
+	}
+	return &Decoder{r: &boltReader{r: &byteReader{Reader: r, b: []byte{0}}}}
+}
+
+// Unmarshal is used to marshal an object to the bolt interface encoded bytes
+func Unmarshal(b []byte) (interface{}, error) {
+	return NewDecoder(bytes.NewReader(b)).Decode()
+}
+
+// Discard drains the rest of the data from the Decoder.
+func (d *Decoder) Discard() error {
+	// We use this instead of io.Copy(ioutil.Discard, conn) since b.Reads
+	// messages in chunks and stops when the next chunk does not exist.
+	// Otherwise we get timeouts since the TCP connection is never sent an EOF.
+	_, err := io.Copy(ioutil.Discard, d.r)
+	return err
+}
+
+// Decode returns the next object from the stream.
+func (d *Decoder) Decode() (interface{}, error) {
+	if d.lastErr != nil {
+		return nil, d.lastErr
+	}
+
+	v, err := d.decode()
+	if err != nil {
+		d.lastErr = err
+		return nil, err
+	}
+
+	var eof uint16
+	err = d.read(&eof)
+	if err != nil {
+		// io.EOF means 0 bytes read, so we've got more to read.
+		if err == io.EOF {
+			return v, nil
+		}
+		d.lastErr = err
+		return nil, err
+	}
+
+	if eof != 0 {
+		d.lastErr = errors.New("invalid eof")
+		return nil, d.lastErr
+	}
+	return v, nil
+}
+
+// More reports whether there the stream contains more usable data.
+func (d *Decoder) More() bool {
+	return d.lastErr == nil
+}
+
+func (d *Decoder) read(v interface{}) error {
+	return binary.Read(d.r, binary.BigEndian, v)
+}
+
+func (d *Decoder) decode() (interface{}, error) {
+	marker, err := d.r.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	// Basic nil, true, and false.
+	switch marker {
+	case NilMarker:
+		return nil, nil
+	case TrueMarker:
+		return true, nil
+	case FalseMarker:
+		return false, nil
+	}
+
+	// Sized numbers.
+	switch marker {
+	default:
+		if int8(marker) >= -16 && int8(marker) <= 127 {
+			return int64(int8(marker)), nil
+		}
+	case Int8Marker:
+		var out int8
+		err := d.read(&out)
+		return int64(out), err
+	case Int16Marker:
+		var out int16
+		err := d.read(&out)
+		return int64(out), err
+	case Int32Marker:
+		var out int32
+		err := d.read(&out)
+		return int64(out), err
+	case Int64Marker:
+		var out int64
+		err := d.read(&out)
+		return out, err
+	case FloatMarker:
+		var out float64
+		err := d.read(&out)
+		return out, err
+	}
+
+	// Strings
+	switch marker {
+	default:
+		if marker >= TinyStringMarker && marker <= TinyStringMarker+0x0F {
+			return d.decodeString(int(marker) - TinyStringMarker)
+		}
+	case String8Marker:
+		var out uint8
+		err := d.read(&out)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeString(int(out))
+	case String16Marker:
+		var out uint16
+		err := d.read(&out)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeString(int(out))
+	case String32Marker:
+		var out uint32
+		err := d.read(&out)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeString(int(out))
+	}
+
+	// Slices
+	switch marker {
+	default:
+		if marker >= TinySliceMarker && marker <= TinySliceMarker+0x0F {
+			return d.decodeSlice(int(marker) - TinySliceMarker)
+		}
+	case Slice8Marker:
+		var size uint8
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeSlice(int(size))
+	case Slice16Marker:
+		var size uint16
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeSlice(int(size))
+	case Slice32Marker:
+		var size uint32
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeSlice(int(size))
+	}
+
+	// Maps
+	switch marker {
+	default:
+		if marker >= TinyMapMarker && marker <= TinyMapMarker+0x0F {
+			return d.decodeMap(int(marker) - TinyMapMarker)
+		}
+	case Map8Marker:
+		var size uint8
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeMap(int(size))
+	case Map16Marker:
+		var size uint16
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeMap(int(size))
+	case Map32Marker:
+		var size uint32
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeMap(int(size))
+	}
+
+	// Structures
+	switch marker {
+	default:
+		if marker >= TinyStructMarker && marker <= TinyStructMarker+0x0F {
+			return d.decodeStruct()
+		}
+	case Struct8Marker:
+		var size uint8
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeStruct()
+	case Struct16Marker:
+		var size uint16
+		err := d.read(&size)
+		if err != nil {
+			return nil, err
+		}
+		return d.decodeStruct()
+	}
+
+	return nil, fmt.Errorf("unrecognized marker byte: %x", marker)
+}
+
+func (d *Decoder) decodeString(size int) (string, error) {
+	if size == 0 {
+		return "", nil
+	}
+	if size <= cap(d.buf) {
+		d.buf = d.buf[0:size]
+	} else {
+		d.buf = make([]byte, size)
+	}
+	_, err := io.ReadFull(d.r, d.buf)
+	if err != nil {
+		return "", err
+	}
+	return string(d.buf), nil
+}
+
+func (d *Decoder) decodeSlice(size int) ([]interface{}, error) {
+	slice := make([]interface{}, size)
+	for i := 0; i < size; i++ {
+		item, err := d.decode()
+		if err != nil {
+			return nil, err
+		}
+		slice[i] = item
+	}
+	return slice, nil
+}
+
+func (d *Decoder) decodeMap(size int) (map[string]interface{}, error) {
+	mapp := make(map[string]interface{}, size)
+	for i := 0; i < size; i++ {
+		keyInt, err := d.decode()
+		if err != nil {
+			return nil, err
+		}
+
+		val, err := d.decode()
+		if err != nil {
+			return nil, err
+		}
+
+		key, ok := keyInt.(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected key type: %T", keyInt)
+		}
+		mapp[key] = val
+	}
+	return mapp, nil
+}
+
+func (d *Decoder) decodeStruct() (interface{}, error) {
+	signature, err := d.r.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	switch signature {
+	case graph.NodeSignature:
+		return d.decodeNode()
+	case graph.RelationshipSignature:
+		return d.decodeRelationship()
+	case graph.PathSignature:
+		return d.decodePath()
+	case graph.UnboundRelationshipSignature:
+		return d.decodeUnboundRelationship()
+	case messages.RecordSignature:
+		return d.decodeRecordMessage()
+	case messages.FailureSignature:
+		return d.decodeFailureMessage()
+	case messages.IgnoredSignature:
+		return messages.Ignored{}, nil
+	case messages.SuccessSignature:
+		return d.decodeSuccessMessage()
+	case messages.AckFailureSignature:
+		return messages.AckFailure{}, nil
+	case messages.DiscardAllMessageSignature:
+		return messages.DiscardAll{}, nil
+	case messages.PullAllSignature:
+		return messages.PullAll{}, nil
+	case messages.ResetSignature:
+		return messages.Reset{}, nil
+	default:
+		return nil, fmt.Errorf("unrecognized type decoding struct with signature %x", signature)
+	}
+}
+
+func (d *Decoder) decodeNode() (graph.Node, error) {
+	var node graph.Node
+	nodeIdentityInt, err := d.decode()
+	if err != nil {
+		return node, err
+	}
+	var ok bool
+	node.NodeIdentity, ok = nodeIdentityInt.(int64)
+	if !ok {
+		return node, fmt.Errorf("unexpected type")
+	}
+
+	labelInt, err := d.decode()
+	if err != nil {
+		return node, err
+	}
+	labelIntSlice, ok := labelInt.([]interface{})
+	if !ok {
+		return node, fmt.Errorf("expected: Labels []string, but got %T", labelInt)
+	}
+	node.Labels, err = sliceInterfaceToString(labelIntSlice)
+	if err != nil {
+		return node, err
+	}
+
+	propertiesInt, err := d.decode()
+	if err != nil {
+		return node, err
+	}
+	node.Properties, ok = propertiesInt.(map[string]interface{})
+	if !ok {
+		return node, fmt.Errorf("expected: Properties map[string]interface{}, but got %T", propertiesInt)
+	}
+	return node, nil
+}
+
+func (d *Decoder) decodeRelationship() (graph.Relationship, error) {
+	var rel graph.Relationship
+
+	relIdentityInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	rel.RelIdentity = relIdentityInt.(int64)
+
+	startNodeIdentityInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	rel.StartNodeIdentity = startNodeIdentityInt.(int64)
+
+	endNodeIdentityInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	rel.EndNodeIdentity = endNodeIdentityInt.(int64)
+
+	var ok bool
+	typeInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	rel.Type, ok = typeInt.(string)
+	if !ok {
+		return rel, fmt.Errorf("expected: Type string, but got %T", typeInt)
+	}
+
+	propertiesInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	rel.Properties, ok = propertiesInt.(map[string]interface{})
+	if !ok {
+		return rel, fmt.Errorf("expected: Properties map[string]interface{}, but got %T", propertiesInt)
+	}
+	return rel, nil
+}
+
+func (d *Decoder) decodePath() (graph.Path, error) {
+	var path graph.Path
+
+	nodesInt, err := d.decode()
+	if err != nil {
+		return path, err
+	}
+	nodesIntSlice, ok := nodesInt.([]interface{})
+	if !ok {
+		return path, fmt.Errorf("expected: Nodes []Node, but got %T", nodesInt)
+	}
+	path.Nodes, err = sliceInterfaceToNode(nodesIntSlice)
+	if err != nil {
+		return path, err
+	}
+
+	relsInt, err := d.decode()
+	if err != nil {
+		return path, err
+	}
+	relsIntSlice, ok := relsInt.([]interface{})
+	if !ok {
+		return path, fmt.Errorf("expected: Relationships []Relationship, but got %T", relsInt)
+	}
+	path.Relationships, err = sliceInterfaceToUnboundRelationship(relsIntSlice)
+	if err != nil {
+		return path, err
+	}
+
+	seqInt, err := d.decode()
+	if err != nil {
+		return path, err
+	}
+	seqIntSlice, ok := seqInt.([]interface{})
+	if !ok {
+		return path, fmt.Errorf("expected: Sequence []int, but got %T", seqInt)
+	}
+	path.Sequence, err = sliceInterfaceToInt(seqIntSlice)
+
+	return path, err
+}
+
+func (d *Decoder) decodeUnboundRelationship() (graph.UnboundRelationship, error) {
+	var rel graph.UnboundRelationship
+
+	relIdentityInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	var ok bool
+	rel.RelIdentity, ok = relIdentityInt.(int64)
+	if !ok {
+		return rel, fmt.Errorf("expected int64, got %T", relIdentityInt)
+	}
+
+	typeInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	rel.Type, ok = typeInt.(string)
+	if !ok {
+		return rel, fmt.Errorf("expected: Type string, but got %T", typeInt)
+	}
+
+	propertiesInt, err := d.decode()
+	if err != nil {
+		return rel, err
+	}
+	rel.Properties, ok = propertiesInt.(map[string]interface{})
+	if !ok {
+		return rel, fmt.Errorf("expected: Properties map[string]interface{}, but got %T", propertiesInt)
+	}
+	return rel, nil
+}
+
+func (d *Decoder) decodeRecordMessage() (messages.Record, error) {
+	fieldsInt, err := d.decode()
+	if err != nil {
+		return messages.Record{}, err
+	}
+	vals, ok := fieldsInt.([]interface{})
+	if !ok {
+		return messages.Record{}, fmt.Errorf("expected: Fields []interface{}, but got %T", fieldsInt)
+	}
+	return messages.Record{Values: vals}, nil
+}
+
+func (d *Decoder) decodeFailureMessage() (messages.Failure, error) {
+	metadataInt, err := d.decode()
+	if err != nil {
+		return messages.Failure{}, err
+	}
+	metadata, ok := metadataInt.(map[string]interface{})
+	if !ok {
+		return messages.Failure{}, fmt.Errorf("expected: Metadata map[string]interface{}, but got %T", metadataInt)
+	}
+	return messages.Failure{Metadata: metadata}, nil
+}
+
+func (d *Decoder) decodeSuccessMessage() (messages.Success, error) {
+	metadataInt, err := d.decode()
+	if err != nil {
+		return messages.Success{}, err
+	}
+	metadata, ok := metadataInt.(map[string]interface{})
+	if !ok {
+		return messages.Success{}, fmt.Errorf("expected: Metadata map[string]interface{}, but got %T", metadataInt)
+	}
+	return messages.Success{Metadata: metadata}, nil
+}
