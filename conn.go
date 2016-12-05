@@ -142,18 +142,22 @@ func (c *conn) handShake() error {
 
 // Read implements io.Reader with conn's timeout.
 func (c *conn) Read(b []byte) (n int, err error) {
-	err = c.conn.SetReadDeadline(time.Now().Add(c.timeout))
-	if err != nil {
-		return 0, err
+	if c.timeout != 0 {
+		err = c.conn.SetReadDeadline(time.Now().Add(c.timeout))
+		if err != nil {
+			return 0, err
+		}
 	}
 	return c.conn.Read(b)
 }
 
 // Write implements io.Writer with conn's timeout.
 func (c *conn) Write(b []byte) (n int, err error) {
-	err = c.conn.SetWriteDeadline(time.Now().Add(c.timeout))
-	if err != nil {
-		return 0, err
+	if c.timeout != 0 {
+		err = c.conn.SetWriteDeadline(time.Now().Add(c.timeout))
+		if err != nil {
+			return 0, err
+		}
 	}
 	return c.conn.Write(b)
 }

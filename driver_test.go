@@ -7,9 +7,7 @@ import (
 	"testing"
 )
 
-var (
-	neo4jConnStr = ""
-)
+var neo4jConnStr = ""
 
 func expect(t *testing.T, r *Rows, n int) {
 	if r == nil {

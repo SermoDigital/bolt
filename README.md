@@ -1,5 +1,5 @@
 # Neo4J Bolt Driver
-[![Build Status](https://travis-ci.org/SermoDigital/bolt.svg?branch=master)](https://travis-ci.org/SermoDigital/bolt) *Tested against Go 1.4.3 and up*
+[![Build Status](https://travis-ci.org/SermoDigital/bolt.svg?branch=master)](https://travis-ci.org/SermoDigital/bolt) *Tested against Go 1.6 and up*
 
 Implements the Neo4J Bolt Protocol specification:
 As of the time of writing this, the current version is v3.1.0-M02
