@@ -68,7 +68,7 @@ const (
 )
 
 // EndMessage is the data to send to end a message
-var EndMessage = []byte{byte(0x00), byte(0x00)}
+var EndMessage = []byte{0, 0}
 
 // Encoder encodes objects of different types to the given stream.
 // Attempts to support all builtin golang types, when it can be confidently
@@ -92,7 +92,8 @@ func NewEncoder(w io.Writer) *Encoder {
 }
 
 // SetChunkSize sets the Encoder's chunk size. It flushes any pending writes
-// using the new chunk size.
+// using the new chunk size if the new chunl size is smaller than the current
+// pending write(s).
 func (e *Encoder) SetChunkSize(size uint16) error {
 	if e.w.size == int(size) {
 		return nil
