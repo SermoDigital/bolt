@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SermoDigital/bolt/structures/graph"
+	"github.com/sermodigital/bolt/structures/graph"
 )
 
 func ifcs(n int) []interface{} {

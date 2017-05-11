@@ -3,7 +3,7 @@ package encoding
 import (
 	"fmt"
 
-	"github.com/SermoDigital/bolt/structures/graph"
+	"github.com/sermodigital/bolt/structures/graph"
 )
 
 func errtype(want string, got interface{}) error {

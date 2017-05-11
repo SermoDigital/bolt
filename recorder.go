@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/SermoDigital/bolt/encoding"
+	"github.com/sermodigital/bolt/encoding"
 )
 
 // recorder records a given session with Neo4j.

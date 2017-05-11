@@ -3,7 +3,7 @@ package bolt
 import (
 	"testing"
 
-	"github.com/SermoDigital/bolt/structures/graph"
+	"github.com/sermodigital/bolt/structures/graph"
 )
 
 func TestBoltTx_Commit(t *testing.T) {

@@ -8,8 +8,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/SermoDigital/bolt/encoding"
-	"github.com/SermoDigital/bolt/structures/messages"
+	"github.com/sermodigital/bolt/encoding"
+	"github.com/sermodigital/bolt/structures/messages"
 )
 
 // ErrInFailedTransaction is returned when an operation is attempted inside

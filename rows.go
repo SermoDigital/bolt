@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/SermoDigital/bolt/encoding"
-	"github.com/SermoDigital/bolt/structures/graph"
-	"github.com/SermoDigital/bolt/structures/messages"
+	"github.com/sermodigital/bolt/encoding"
+	"github.com/sermodigital/bolt/structures/graph"
+	"github.com/sermodigital/bolt/structures/messages"
 )
 
 // Rows represents results of rows from the DB.

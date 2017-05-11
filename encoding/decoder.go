@@ -8,8 +8,8 @@ import (
 	"io"
 	"io/ioutil"
 
-	"github.com/SermoDigital/bolt/structures/graph"
-	"github.com/SermoDigital/bolt/structures/messages"
+	"github.com/sermodigital/bolt/structures/graph"
+	"github.com/sermodigital/bolt/structures/messages"
 )
 
 type reader interface {

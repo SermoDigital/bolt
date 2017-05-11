@@ -8,7 +8,7 @@ import (
 	"io"
 	"math"
 
-	"github.com/SermoDigital/bolt/structures"
+	"github.com/sermodigital/bolt/structures"
 )
 
 const (

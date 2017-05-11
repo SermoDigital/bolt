@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/SermoDigital/bolt/encoding"
+	"github.com/sermodigital/bolt/encoding"
 )
 
 var errNotMap = errors.New("if one argument is passed it must be a bolt-encoded map")
