@@ -2,61 +2,55 @@ package bolt
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/sermodigital/bolt/encoding"
 )
 
-// recorder records a given session with Neo4j.
-// allows for playback of sessions as well
-type recorder struct {
-	conn   net.Conn
-	name   string
+var (
+	_ driver.Driver = (*Recorder)(nil)
+	_ net.Conn      = (*Recorder)(nil)
+)
+
+// Recorder allows for recording and playback of a session. The Name field can
+// be set and when closed the Recorder will write out the session to a gzipped
+// JSON file with the specified name. For example
+//
+//  const name = "TestRecordedSession"
+//  sql.Register(name, &Recorder{Name: name})
+//
+//  db, err := sql.Open(name)
+//  if err != nil { ... }
+//
+//  // Lots of code
+//
+//  // The recording will be saved as "TestRecordedSession.json.gzip"
+//  if err := db.Close(); err != nil { ... }
+//
+// Do note: a Recorder where Name == "" has already been registered using the
+// name
+//
+//  bolt-recorder
+//
+// and will create a random, timestamped file name.
+type Recorder struct {
+	Name string
+
+	net.Conn
 	events []*Event
 	cur    int
 }
 
-// OpenRecorder opens a *DB that records the session. Name will be the name of
-// the gzipped JSON file containing the recorded session.
-func OpenRecorder(name, dataSourceName string) (*DB, error) {
-	db, err := openPool(&recorder{name: name}, dataSourceName)
-	if err != nil {
-		return nil, err
-	}
-	return db, nil
-}
-
 // Open opens a simulated Neo4j connection using pre-recorded data if name is
 // an empty string. Otherwise, it opens up an actual connection using that to
 // create a new recording.
-func (r *recorder) Open(name string) (driver.Conn, error) {
-	conn, err := r.open(name)
-	if err != nil {
-		return nil, err
-	}
-	return &sqlConn{conn}, nil
-}
-
-// Open opens a simulated Neo4j connection using pre-recorded data if name is
-// an empty string. Otherwise, it opens up an actual connection using that to
-// create a new recording.
-func (r *recorder) OpenNeo(name string) (Conn, error) {
-	conn, err := r.open(name)
-	if err != nil {
-		return nil, err
-	}
-	return &boltConn{conn}, nil
-}
-
-func (r *recorder) open(name string) (*conn, error) {
+func (r *Recorder) Open(name string) (driver.Conn, error) {
 	if name == "" {
 		err := r.load()
 		if err != nil {
@@ -68,16 +62,16 @@ func (r *recorder) open(name string) (*conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.conn = conn
+	r.Conn = conn
 	return newConn(r, v)
 }
 
-func (r *recorder) completedLast() bool {
+func (r *Recorder) completedLast() bool {
 	event := r.lastEvent()
 	return event == nil || event.Completed
 }
 
-func (r *recorder) lastEvent() *Event {
+func (r *Recorder) lastEvent() *Event {
 	if len(r.events) > 0 {
 		return r.events[len(r.events)-1]
 	}
@@ -85,9 +79,9 @@ func (r *recorder) lastEvent() *Event {
 }
 
 // Read reads from the net.Conn, recording the interaction.
-func (r *recorder) Read(p []byte) (n int, err error) {
-	if r.conn != nil {
-		n, err = r.conn.Read(p)
+func (r *Recorder) Read(p []byte) (n int, err error) {
+	if r.Conn != nil {
+		n, err = r.Conn.Read(p)
 		r.record(p[:n], false)
 		r.recordErr(err, false)
 		return n, err
@@ -114,13 +108,13 @@ func (r *recorder) Read(p []byte) (n int, err error) {
 }
 
 // Close the net.Conn, outputting the recording.
-func (r *recorder) Close() error {
-	if r.conn != nil {
+func (r *Recorder) Close() error {
+	if r.Conn != nil {
 		err := r.flush()
 		if err != nil {
 			return err
 		}
-		return r.conn.Close()
+		return r.Conn.Close()
 	}
 	if len(r.events) > 0 {
 		if r.cur != len(r.events) {
@@ -134,9 +128,9 @@ func (r *recorder) Close() error {
 }
 
 // Write to the net.Conn, recording the interaction.
-func (r *recorder) Write(b []byte) (n int, err error) {
-	if r.conn != nil {
-		n, err = r.conn.Write(b)
+func (r *Recorder) Write(b []byte) (n int, err error) {
+	if r.Conn != nil {
+		n, err = r.Conn.Write(b)
 		r.record(b[:n], true)
 		r.recordErr(err, true)
 		return n, err
@@ -161,7 +155,7 @@ func (r *recorder) Write(b []byte) (n int, err error) {
 	return len(b), nil
 }
 
-func (r *recorder) record(data []byte, isWrite bool) {
+func (r *Recorder) record(data []byte, isWrite bool) {
 	if len(data) == 0 {
 		return
 	}
@@ -173,10 +167,12 @@ func (r *recorder) record(data []byte, isWrite bool) {
 	}
 
 	event.Event = append(event.Event, data...)
-	event.Completed = bytes.HasSuffix(data, encoding.EndMessage)
+	event.Completed = bytes.HasSuffix(data, endMessage)
 }
 
-func (r *recorder) recordErr(err error, isWrite bool) {
+var endMessage = []byte{0, 0}
+
+func (r *Recorder) recordErr(err error, isWrite bool) {
 	if err == nil {
 		return
 	}
@@ -190,23 +186,23 @@ func (r *recorder) recordErr(err error, isWrite bool) {
 	event.Completed = true
 }
 
-func (r *recorder) ensureName() {
-	if r.name != "" {
+func (r *Recorder) ensureName() {
+	if r.Name != "" {
 		return
 	}
 	var buf [16]byte
 	_, err := rand.Read(buf[:])
 	if err != nil {
-		copy(buf[:], "rand_read_failed")
+		copy(buf[:], "rand_read_failed") // 16 chars
 	}
 	dst := make([]byte, hex.EncodedLen(len(buf)))
 	hex.Encode(dst, buf[:])
-	r.name = string(time.Now().AppendFormat(dst, "2006_01_02_15_04_05"))
+	r.Name = string(time.Now().AppendFormat(dst, "2006-01-02-15-04-05"))
 }
 
-func (r *recorder) load() error {
+func (r *Recorder) load() error {
 	r.ensureName()
-	path := filepath.Join("recordings", r.name+".json")
+	path := filepath.Join("recordings", r.Name+".json")
 	file, err := os.OpenFile(path, os.O_RDONLY, 0660)
 	if os.IsNotExist(err) {
 		return nil
@@ -218,9 +214,9 @@ func (r *recorder) load() error {
 	return json.NewDecoder(file).Decode(&r.events)
 }
 
-func (r *recorder) writeRecording() error {
+func (r *Recorder) writeRecording() error {
 	r.ensureName()
-	path := filepath.Join("recordings", r.name+".json")
+	path := filepath.Join("recordings", r.Name+".json")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0660)
 	if err != nil {
 		return err
@@ -229,44 +225,9 @@ func (r *recorder) writeRecording() error {
 	return json.NewEncoder(file).Encode(r.events)
 }
 
-func (r *recorder) flush() error {
+func (r *Recorder) flush() error {
 	if os.Getenv("RECORD_OUTPUT") != "" {
 		return r.writeRecording()
-	}
-	return nil
-}
-
-func (r *recorder) LocalAddr() net.Addr {
-	if r.conn != nil {
-		return r.conn.LocalAddr()
-	}
-	return nil
-}
-
-func (r *recorder) RemoteAddr() net.Addr {
-	if r.conn != nil {
-		return r.conn.RemoteAddr()
-	}
-	return nil
-}
-
-func (r *recorder) SetDeadline(t time.Time) error {
-	if r.conn != nil {
-		return r.conn.SetDeadline(t)
-	}
-	return nil
-}
-
-func (r *recorder) SetReadDeadline(t time.Time) error {
-	if r.conn != nil {
-		return r.conn.SetReadDeadline(t)
-	}
-	return nil
-}
-
-func (r *recorder) SetWriteDeadline(t time.Time) error {
-	if r.conn != nil {
-		return r.conn.SetWriteDeadline(t)
 	}
 	return nil
 }

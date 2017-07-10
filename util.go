@@ -1,104 +1,174 @@
 package bolt
 
 import (
-	"bytes"
+	"database/sql"
 	"database/sql/driver"
-	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"github.com/sermodigital/bolt/encoding"
 )
 
-var errNotMap = errors.New("if one argument is passed it must be a bolt-encoded map")
-
-// maybeMap returns whether the []byte could be a bolt-encoded map without
-// actually marshalling it into a map.
-func maybeMap(m []byte) bool {
-	// TODO: make this a function inside encoding?
-
-	minlen := 1 /* marker */ + 2 /* length */ + len(encoding.EndMessage)
-
-	// Must be long enough to hold a marker, length, and ending bytes.
-	if len(m) < minlen {
-		return false
-	}
-
-	// Must have ending bytes.
-	if !bytes.HasSuffix(m, encoding.EndMessage) {
-		return false
-	}
-
-	// Length must be correct.
-	if int(binary.BigEndian.Uint16(m)) != len(m)-(2 /* length */ +len(encoding.EndMessage)) {
-		return false
-	}
-
-	// And, finally, it must have a map marker.
-	c := m[2]
-	return (c >= encoding.TinyMapMarker &&
-		c <= encoding.TinyMapMarker+0x0F) ||
-		c == encoding.Map8Marker ||
-		c == encoding.Map16Marker ||
-		c == encoding.Map32Marker
+// UnrecognizedResponseErr is an error used when the server sends a reply this
+// library cannot recognize. It might indicate a version mismatch or a library
+// bug.
+type UnrecognizedResponseErr struct {
+	v interface{}
 }
 
-// driverArgsToMap turns driver.Value list into a parameter map for Neo4j
-// parameters.
-func driverArgsToMap(args []driver.Value) (map[string]interface{}, error) {
+func (u UnrecognizedResponseErr) Error() string {
+	return fmt.Sprintf("unrecognized response from server: %#v", u.v)
+}
+
+// Array implements sql.Scanner and should be used to retrieve, e.g., a list
+// from sql.Rows.
+type Array []interface{}
+
+func (a *Array) Scan(val interface{}) error {
+	a0, ok := val.([]interface{})
+	if !ok {
+		return fmt.Errorf("Array.Scan: unknown type: %T", val)
+	}
+	*a = a0
+	return nil
+}
+
+// Map is a utility type. See the package docs for its use in Query, Exec, etc.
+// calls. It also implements sql.Scanner and should be used to retrieve, e.g.,
+// properties from sql.Rows.
+type Map map[string]interface{}
+
+func (m *Map) Scan(val interface{}) error {
+	m0, ok := val.(Map)
+	if !ok {
+		return fmt.Errorf("Map.Scan: unknown type: %T", val)
+	}
+	*m = m0
+	return nil
+}
+
+var (
+	_ sql.Scanner = (*Array)(nil)
+	_ sql.Scanner = (*Map)(nil)
+)
+
+func driverArgsToMap(args []driver.NamedValue) (map[string]interface{}, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+
 	if len(args) == 1 {
-		b, ok := args[0].([]byte)
-		if !ok || !maybeMap(b) {
-			return nil, errNotMap
+		v := args[0].Value
+		// In Go 1.9 we can pass a Map itself, < 1.9 we can't.
+		if isGo19 {
+			if m, ok := v.(Map); ok {
+				return m, nil
+			}
+		} else if p, ok := v.([]byte); ok && encoding.MaybeMap(p) {
+			if v, err := encoding.Unmarshal(p); err == nil {
+				if m, ok := v.(map[string]interface{}); ok {
+					return m, nil
+				}
+			}
 		}
-		v, err := encoding.Unmarshal(b)
-		if err != nil {
-			return nil, err
+		return nil, ErrNotMap
+	}
+
+	out := make(map[string]interface{}, len(args))
+	for _, arg := range args {
+		if arg.Name == "" {
+			return nil, errors.New("bolt: cannot have an empty name")
 		}
-		m, ok := v.(map[string]interface{})
+		out[arg.Name] = arg.Value
+	}
+	return out, nil
+}
+
+var (
+	errOddLength = errors.New("bolt: odd number of arguments")
+	errNotString = errors.New("bolt: odd-numbered arguments must be strings")
+)
+
+func driverArgsToMap2(args []driver.Value) (map[string]interface{}, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+
+	if len(args) == 1 {
+		m, ok := args[0].(Map)
 		if !ok {
-			return nil, errNotMap
+			return nil, ErrNotMap
 		}
 		return m, nil
 	}
 
 	if len(args)%2 != 0 {
-		return nil, errors.New("must pass an even number of arguments")
+		return nil, errOddLength
 	}
-
-	var r bytes.Reader
-	var dec *encoding.Decoder
 
 	out := make(map[string]interface{}, len(args)/2)
 	for i := 0; i < len(args); i += 2 {
 		key, ok := args[i].(string)
 		if !ok {
-			return nil, errors.New("even-numbered argument(s) must be a string")
+			return nil, errNotString
 		}
-		v := args[i+1]
-		b, ok := v.([]byte)
-		// If type is []byte we have two cases:
-		//
-		// 	1.) It's encoded with bolt's protocol, in which case it'll end with
-		// 		two 0 bytes.
-		//
-		// 	2.) It's a regular byte slice, in which case it may or may not end
-		// 		with two 0 bytes.
-		//
-		// 	Handle case #1 first, falling back to plugging the byte slice into
-		// 	the map.
-		if ok && bytes.HasSuffix(b, encoding.EndMessage) {
-			r.Reset(b)
-			if dec == nil {
-				dec = encoding.NewDecoder(&r)
-			}
-			v, err := dec.Decode()
-			// If err == nil case 1 succeeded.
-			if err == nil {
-				out[key] = v
-				continue
-			}
-		}
-		out[key] = v
+		out[key] = args[i+1]
 	}
 	return out, nil
+}
+
+func parseCols(md map[string]interface{}) []string {
+	val, ok := md["fields"]
+	if !ok {
+		return nil
+	}
+
+	fifc, ok := val.([]interface{})
+	if !ok {
+		return nil
+	}
+
+	cols := make([]string, len(fifc))
+	for i, col := range fifc {
+		cols[i], ok = col.(string)
+		if !ok {
+			return nil
+		}
+	}
+	return cols
+}
+
+type multiError []error
+
+func (m multiError) Error() string {
+	switch n := len(m); n {
+	case 0:
+		return "<nil>"
+	case 1:
+		return m[0].Error()
+	case 2:
+		return fmt.Sprintf("%s and %s", m[0].Error(), m[1].Error())
+	default:
+		var str string
+		for _, err := range m {
+			str += fmt.Sprintf("*%s\n", err.Error())
+		}
+		return str
+	}
+}
+
+func multi(errs ...error) error {
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	e := make(multiError, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			e = append(e, err)
+		}
+	}
+	if len(e) == 1 {
+		return e[0]
+	}
+	return e
 }

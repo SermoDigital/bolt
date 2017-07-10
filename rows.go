@@ -3,71 +3,36 @@ package bolt
 import (
 	"database/sql/driver"
 	"errors"
-	"fmt"
 	"io"
 
-	"github.com/sermodigital/bolt/encoding"
 	"github.com/sermodigital/bolt/structures/graph"
 	"github.com/sermodigital/bolt/structures/messages"
 )
 
-// Rows represents results of rows from the DB.
-type rows interface {
-	// Metadata returns the metadata for the current row.
-	Metadata() map[string]interface{}
+var _ driver.Rows = (*rows)(nil)
 
-	driver.Rows
-}
-
-type boltRows struct {
+type rows struct {
 	conn     *conn
 	cols     []string
-	md       map[string]interface{}
 	closed   bool // true if Close successfully called.
 	finished bool // true if all rows have been read.
+	md       map[string]interface{}
 }
 
-// Columns returns the columns from the result
-func (r *boltRows) Columns() []string {
-	if r.cols != nil {
-		return r.cols
-	}
-
-	val, ok := r.md["fields"]
-	if !ok {
-		return nil
-	}
-
-	fifc, ok := val.([]interface{})
-	if !ok {
-		return nil
-	}
-
-	cols := make([]string, len(fifc))
-	for i, col := range fifc {
-		cols[i], ok = col.(string)
-		if !ok {
-			return nil
-		}
-	}
-	r.cols = cols
-	return cols
+// Columns returns the 'fields' returned from the server. It helps implement
+// driver.Rows.
+func (r *rows) Columns() []string {
+	return r.cols
 }
 
-// Metadata returns the metadata for the current row.
-func (r *boltRows) Metadata() map[string]interface{} {
-	return r.md
-}
-
-// Close closes the rows
-func (r *boltRows) Close() error {
+// Close closes the rows. It helps implement driver.Rows.
+func (r *rows) Close() error {
 	if r.closed {
 		return nil
 	}
 	// We haven't read all the rows.
 	if !r.finished {
-		err := r.conn.dec.Discard()
-		if err != nil {
+		if err := r.conn.dec.Discard(); err != nil {
 			return err
 		}
 		r.finished = true
@@ -76,56 +41,45 @@ func (r *boltRows) Close() error {
 	return nil
 }
 
-// Next gets the next row result
-func (r *boltRows) Next(dest []driver.Value) error {
-	data, err := r.next()
-	if err != nil {
-		return err
-	}
+// ErrRowsClosed is returned when the Rows have already been closed.
+var ErrRowsClosed = errors.New("bolt: rows have been closed")
 
-	for i, item := range data {
-		switch item := item.(type) {
-		case driver.Value:
-			dest[i] = item
-		case []interface{}, map[string]interface{},
-			graph.Node, graph.Path,
-			graph.Relationship, graph.UnboundRelationship:
-			dest[i], err = encoding.Marshal(item)
-			if err != nil {
-				return err
-			}
-		default:
-			dest[i], err = driver.DefaultParameterConverter.ConvertValue(item)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return err
-}
-
-// NextNeo gets the next row result
-// When the rows are completed, returns the success metadata
-// and io.EOF
-func (r *boltRows) next() ([]interface{}, error) {
+// Next returns the next row. It helps implement driver.Rows.
+func (r *rows) Next(dest []driver.Value) error {
 	if r.closed {
-		return nil, errors.New("rows are already closed")
+		return ErrRowsClosed
 	}
 
 	resp, err := r.conn.consume()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	switch t := resp.(type) {
 	case messages.Success:
 		r.md = t.Metadata
 		r.finished = true
-		return nil, io.EOF
+		return io.EOF
 	case messages.Record:
-		r.md = nil
-		return t.Values, nil
+		for i, item := range t.Values {
+			switch item := item.(type) {
+			case driver.Value,
+				Array,
+				Map,
+				graph.Node,
+				graph.Path,
+				graph.Relationship,
+				graph.UnboundRelationship:
+				dest[i] = item
+			default:
+				dest[i], err = driver.DefaultParameterConverter.ConvertValue(item)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	default:
-		return nil, fmt.Errorf("Unrecognized response type getting next query row: %#v", resp)
+		return UnrecognizedResponseErr{v: resp}
 	}
 }

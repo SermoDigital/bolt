@@ -1,5 +1,10 @@
 package graph
 
+import (
+	"database/sql"
+	"fmt"
+)
+
 const (
 	// UnboundRelationshipSignature is the signature byte for a UnboundRelationship object
 	UnboundRelationshipSignature = 0x72
@@ -21,3 +26,14 @@ func (r UnboundRelationship) Signature() uint8 {
 func (r UnboundRelationship) Fields() []interface{} {
 	return []interface{}{r.RelIdentity, r.Type, r.Properties}
 }
+
+func (u *UnboundRelationship) Scan(val interface{}) error {
+	u0, ok := val.(UnboundRelationship)
+	if !ok {
+		return fmt.Errorf("UnboundRelationship.Scan: unknown type: %T", val)
+	}
+	*u = u0
+	return nil
+}
+
+var _ sql.Scanner = (*UnboundRelationship)(nil)

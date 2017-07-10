@@ -15,50 +15,45 @@ import (
 	"time"
 )
 
-var (
-	magicPreamble     = []byte{0x60, 0x60, 0xb0, 0x17}
-	supportedVersions = []byte{
-		0x00, 0x00, 0x00, 0x01,
-		0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00,
-		0x00, 0x00, 0x00, 0x00,
-	}
-	handShake          = append(magicPreamble, supportedVersions...)
-	noVersionSupported = [4]byte{0x00, 0x00, 0x00, 0x00}
-)
+var handshake = [...]byte{
+	// magic preamble
+	0x60, 0x60, 0xB0, 0x17,
+
+	// supported versions
+	0x00, 0x00, 0x00, 0x01,
+	0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+}
+
+type version [4]byte
+
+var noSupportedVersions = version{0x00, 0x00, 0x00, 0x00}
 
 const (
 	// Version is the current version of this driver
-	Version = "2.0"
+	Version = "3.0"
 
 	// ClientID is the id of this client
-	ClientID = "GoNeo4jBolt/" + Version
+	ClientID = "SermoDigitalBolt/" + Version
+
+	DefaultPort = "7687"      // default port for regular socket connections
+	DefaultHost = "localhost" // default host for regular socket connections
+	Scheme      = "bolt://"   // Bolt protocol's URI scheme
 )
 
 // Open calls DialOpen with the default dialer.
 func Open(name string) (driver.Conn, error) {
-	env := os.Getenv(TLSEnv)
-	if env == "1" || env == "true" {
+	switch os.Getenv(TLSEnv) {
+	case "1", "true":
 		drv, err := TLSDialer("", "", "", false)
 		if err != nil {
 			return nil, err
 		}
 		return DialOpen(drv, name)
+	default:
+		return DialOpen(&dialer{}, name)
 	}
-	return DialOpen(&dialer{}, name)
-}
-
-// OpenNeo calls DialOpenNeo with the default dialer.
-func OpenNeo(name string) (Conn, error) {
-	env := os.Getenv(TLSEnv)
-	if env == "1" || env == "true" {
-		drv, err := TLSDialer("", "", "", false)
-		if err != nil {
-			return nil, err
-		}
-		return DialOpenNeo(drv, name)
-	}
-	return DialOpenNeo(&dialer{}, name)
 }
 
 // DialOpen opens a driver.Conn with the given Dialer and network configuration.
@@ -71,20 +66,7 @@ func DialOpen(d Dialer, name string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &sqlConn{conn}, nil
-}
-
-// DialOpenNeo opens an Conn with the given Dialer and network configuration.
-func DialOpenNeo(d Dialer, name string) (Conn, error) {
-	nc, v, err := open(d, name)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := newConn(nc, v)
-	if err != nil {
-		return nil, err
-	}
-	return &boltConn{conn}, nil
+	return conn, nil
 }
 
 // parseTimeout returns the timeout in seconds.
@@ -101,14 +83,14 @@ func parseTimeout(tos string) (time.Duration, error) {
 
 func open(d Dialer, name string) (net.Conn, values, error) {
 	// Default Neo4j configuration information.
-	v := values{"host": "localhost", "port": "7474"}
+	v := values{"host": DefaultHost, "port": DefaultPort}
 
 	// Parse environment variables if applicable. These will be overwritten by
 	// the URI configuration if it exists.
 	v.merge(parseEnv())
 
 	// Parse our values from the URL if applicable.
-	if strings.HasPrefix(name, "bolt://") {
+	if strings.HasPrefix(name, Scheme) {
 		err := parseURL(v, name)
 		if err != nil {
 			return nil, nil, err
@@ -304,11 +286,6 @@ func (d *drv) Open(name string) (driver.Conn, error) {
 	return Open(name)
 }
 
-// OpenNeo opens a new Bolt connection to the Neo4J database
-func (d *drv) OpenNeo(name string) (Conn, error) {
-	return OpenNeo(name)
-}
-
 type values map[string]string
 
 func (v values) set(k, vv string) {
@@ -332,11 +309,11 @@ func (v values) merge(v2 values) {
 }
 
 const (
-	boltName     = "bolt"
-	recorderName = "bolt-recorder"
+	DefaultDriver   = "bolt"
+	RecordingDriver = "bolt-recorder"
 )
 
 func init() {
-	sql.Register(boltName, &drv{})
-	sql.Register(recorderName, &recorder{})
+	sql.Register(DefaultDriver, &drv{})
+	sql.Register(RecordingDriver, &Recorder{})
 }

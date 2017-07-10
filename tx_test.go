@@ -20,13 +20,13 @@ func TestBoltTx_Commit(t *testing.T) {
 		t.Fatalf("an error occurred preparing statement: %s", err)
 	}
 
-	result, err := stmt.Exec(nil)
+	result, err := stmt.Exec()
 	if err != nil {
 		t.Fatalf("an error occurred querying Neo: %s", err)
 	}
 
 	if num, err := result.RowsAffected(); num != 5 {
-		t.Fatalf("expected 5 rows affected: %#v err: %#v", result.Metadata(), err)
+		t.Fatalf("expected 5 rows affected: %#v", err)
 	}
 
 	err = stmt.Close()
@@ -44,14 +44,16 @@ func TestBoltTx_Commit(t *testing.T) {
 		t.Fatalf("an error occurred preparing statement: %s", err)
 	}
 
-	rows, err := stmt.Query(nil)
+	rows, err := stmt.Query()
 	if err != nil {
 		t.Fatalf("an error occurred querying Neo: %s", err)
 	}
 
 	output := ifcs(5)
 	for rows.Next() {
-		rows.Scan(output...)
+		if err := rows.Scan(output...); err != nil {
+			t.Fatal(err)
+		}
 	}
 	deref(output...)
 
@@ -86,12 +88,12 @@ func TestBoltTx_Commit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stmt, err = driver.Prepare(`MATCH (f:FOO)-[b:TO]->(c:BAR)<-[d:FROM]-(e:BAZ) DELETE f, b, c, d, e`)
+	stmt, err = driver.Prepare("MATCH (f:FOO)-[b:TO]->(c:BAR)<-[d:FROM]-(e:BAZ) DELETE f, b, c, d, e")
 	if err != nil {
 		t.Fatalf("an error occurred preparing delete statement: %s", err)
 	}
 
-	_, err = stmt.Exec(nil)
+	_, err = stmt.Exec()
 	if err != nil {
 		t.Fatalf("an error occurred on delete query to Neo: %s", err)
 	}
@@ -120,13 +122,13 @@ func TestBoltTx_Rollback(t *testing.T) {
 		t.Fatalf("an error occurred preparing statement: %s", err)
 	}
 
-	result, err := stmt.Exec(nil)
+	result, err := stmt.Exec()
 	if err != nil {
 		t.Fatalf("an error occurred querying Neo: %s", err)
 	}
 
 	if num, err := result.RowsAffected(); num != 5 {
-		t.Fatalf("expected 5 rows affected: %#v err: %#v", result.Metadata(), err)
+		t.Fatalf("expected 5 rows affected: %#v", err)
 	}
 
 	err = stmt.Close()
@@ -144,7 +146,7 @@ func TestBoltTx_Rollback(t *testing.T) {
 		t.Fatalf("an error occurred preparing statement: %s", err)
 	}
 
-	rows, err := stmt.Query(nil)
+	rows, err := stmt.Query()
 	if err != nil {
 		t.Fatalf("an error occurred querying Neo: %s", err)
 	}

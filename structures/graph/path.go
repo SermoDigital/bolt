@@ -1,5 +1,10 @@
 package graph
 
+import (
+	"database/sql"
+	"fmt"
+)
+
 const (
 	// PathSignature is the signature byte for a Path object
 	PathSignature = 0x50
@@ -33,3 +38,14 @@ func (p Path) Fields() []interface{} {
 	}
 	return []interface{}{nodes, relationships, sequences}
 }
+
+func (p *Path) Scan(val interface{}) error {
+	p0, ok := val.(Path)
+	if !ok {
+		return fmt.Errorf("Path.Scan: unknown type: %T", val)
+	}
+	*p = p0
+	return nil
+}
+
+var _ sql.Scanner = (*Path)(nil)

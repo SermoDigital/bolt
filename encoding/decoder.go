@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 
 	"github.com/sermodigital/bolt/structures/graph"
 	"github.com/sermodigital/bolt/structures/messages"
@@ -19,22 +20,21 @@ type reader interface {
 
 type byteReader struct {
 	io.Reader
-	b []byte
+	b [1]byte
 }
 
 func (b *byteReader) ReadByte() (byte, error) {
-	_, err := io.ReadFull(b.Reader, b.b[0:1])
+	_, err := io.ReadFull(b.Reader, b.b[:1])
 	return b.b[0], err
 }
 
-type boltReader struct {
+type chunkReader struct {
 	r      reader
-	length uint16
+	length uint16 // remaining bytes in the chunk to read
 }
 
-func (b *boltReader) next() error {
-	err := binary.Read(b.r, binary.BigEndian, &b.length)
-	if err != nil {
+func (b *chunkReader) next() error {
+	if err := binary.Read(b.r, binary.BigEndian, &b.length); err != nil {
 		return err
 	}
 	if b.length == 0 {
@@ -44,33 +44,32 @@ func (b *boltReader) next() error {
 }
 
 // Read implements io.Reader.
-func (b *boltReader) Read(p []byte) (n int, err error) {
-	if b.length <= 0 {
-		err = b.next()
-		if err != nil {
+func (r *chunkReader) Read(p []byte) (n int, err error) {
+	if r.length <= 0 {
+		if err = r.next(); err != nil {
 			return 0, err
 		}
 	}
-	if len(p) > int(b.length) {
-		p = p[0:b.length]
+	if len(p) > int(r.length) {
+		p = p[0:r.length]
 	}
-	n, err = b.r.Read(p)
-	b.length -= uint16(n)
+	n, err = r.r.Read(p)
+	r.length -= uint16(n)
 	return n, err
 }
 
-func (b *boltReader) ReadByte() (c byte, err error) {
-	if b.length <= 0 {
-		err = b.next()
-		if err != nil {
+// ReadByte implements io.ByteReader.
+func (r *chunkReader) ReadByte() (c byte, err error) {
+	if r.length <= 0 {
+		if err = r.next(); err != nil {
 			return 0, err
 		}
 	}
-	c, err = b.r.ReadByte()
+	c, err = r.r.ReadByte()
 	if err != nil {
 		return 0, err
 	}
-	b.length--
+	r.length--
 	return c, err
 }
 
@@ -84,18 +83,17 @@ func (b *boltReader) ReadByte() (c byte, err error) {
 // []interface{} are supported. The interface for maps and slices may be more
 // permissive in the future.
 type Decoder struct {
-	r       *boltReader
-	buf     []byte
+	r       *chunkReader
+	scratch [512]byte
 	lastErr error
 }
 
 // NewDecoder creates a new Decoder object
 func NewDecoder(r io.Reader) *Decoder {
-	rr, ok := r.(reader)
-	if ok {
-		return &Decoder{r: &boltReader{r: rr}}
+	if rr, ok := r.(reader); ok {
+		return &Decoder{r: &chunkReader{r: rr}}
 	}
-	return &Decoder{r: &boltReader{r: &byteReader{Reader: r, b: []byte{0}}}}
+	return &Decoder{r: &chunkReader{r: &byteReader{Reader: r}}}
 }
 
 // Unmarshal is used to marshal an object to the bolt interface encoded bytes
@@ -107,7 +105,7 @@ func Unmarshal(b []byte) (interface{}, error) {
 func (d *Decoder) Discard() error {
 	// We use this instead of io.Copy(ioutil.Discard, conn) since b.Reads
 	// messages in chunks and stops when the next chunk does not exist.
-	// Otherwise we get timeouts since the TCP connection is never sent an EOF.
+	// That causes timeouts since the TCP connection is never sent EOF.
 	_, err := io.Copy(ioutil.Discard, d.r)
 	return err
 }
@@ -125,8 +123,7 @@ func (d *Decoder) Decode() (interface{}, error) {
 	}
 
 	var eof uint16
-	err = d.read(&eof)
-	if err != nil {
+	if err = d.read(&eof); err != nil {
 		// io.EOF means 0 bytes read, so we've got more to read.
 		if err == io.EOF {
 			return v, nil
@@ -151,176 +148,167 @@ func (d *Decoder) read(v interface{}) error {
 	return binary.Read(d.r, binary.BigEndian, v)
 }
 
+func (d *Decoder) int8() (int64, error) {
+	_, err := io.ReadFull(d.r, d.scratch[:1])
+	return int64(int8(d.scratch[0])), err
+}
+
+func (d *Decoder) int16() (int64, error) {
+	_, err := io.ReadFull(d.r, d.scratch[:2])
+	return int64(int16(binary.BigEndian.Uint16(d.scratch[:2]))), err
+}
+
+func (d *Decoder) int32() (int64, error) {
+	_, err := io.ReadFull(d.r, d.scratch[:4])
+	return int64(int32(binary.BigEndian.Uint32(d.scratch[:4]))), err
+}
+
+func (d *Decoder) int64() (int64, error) {
+	_, err := io.ReadFull(d.r, d.scratch[:8])
+	return int64(binary.BigEndian.Uint64(d.scratch[:8])), err
+}
+
+func (d *Decoder) float() (float64, error) {
+	_, err := io.ReadFull(d.r, d.scratch[:8])
+	return math.Float64frombits(binary.BigEndian.Uint64(d.scratch[:8])), err
+}
+
+func adjust(c byte) byte {
+	if c < packedUpper && c > packedLower {
+		c -= c % 16
+	}
+	return c
+}
+
 func (d *Decoder) decode() (interface{}, error) {
 	marker, err := d.r.ReadByte()
 	if err != nil {
 		return nil, err
 	}
 
+	switch adjust(marker) {
 	// Basic nil, true, and false.
-	switch marker {
-	case NilMarker:
+	case Nil:
 		return nil, nil
-	case TrueMarker:
+	case True:
 		return true, nil
-	case FalseMarker:
+	case False:
 		return false, nil
-	}
 
-	// Sized numbers.
-	switch marker {
+	// Numbers
 	default:
-		if int8(marker) >= -16 && int8(marker) <= 127 {
-			return int64(int8(marker)), nil
+		if m := int8(marker); m >= -16 && m <= 127 {
+			return int64(m), nil
 		}
-	case Int8Marker:
-		var out int8
-		err := d.read(&out)
-		return int64(out), err
-	case Int16Marker:
-		var out int16
-		err := d.read(&out)
-		return int64(out), err
-	case Int32Marker:
-		var out int32
-		err := d.read(&out)
-		return int64(out), err
-	case Int64Marker:
-		var out int64
-		err := d.read(&out)
-		return out, err
-	case FloatMarker:
-		var out float64
-		err := d.read(&out)
-		return out, err
-	}
+		return nil, fmt.Errorf("unrecognized marker byte: %x", marker)
+	case Int8:
+		return d.int8()
+	case Int16:
+		return d.int16()
+	case Int32:
+		return d.int32()
+	case Int64:
+		return d.int64()
+	case Float:
+		return d.float()
 
 	// Strings
-	switch marker {
-	default:
-		if marker >= TinyStringMarker && marker <= TinyStringMarker+0x0F {
-			return d.decodeString(int(marker) - TinyStringMarker)
-		}
-	case String8Marker:
-		var out uint8
-		err := d.read(&out)
+	case TinyString:
+		return d.decodeString(int(marker) - TinyString)
+	case String8:
+		length, err := d.int8()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeString(int(out))
-	case String16Marker:
-		var out uint16
-		err := d.read(&out)
+		return d.decodeString(int(length))
+	case String16:
+		length, err := d.int16()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeString(int(out))
-	case String32Marker:
-		var out uint32
-		err := d.read(&out)
+		return d.decodeString(int(length))
+	case String32:
+		length, err := d.int32()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeString(int(out))
-	}
+		return d.decodeString(int(length))
 
 	// Slices
-	switch marker {
-	default:
-		if marker >= TinySliceMarker && marker <= TinySliceMarker+0x0F {
-			return d.decodeSlice(int(marker) - TinySliceMarker)
-		}
-	case Slice8Marker:
-		var size uint8
-		err := d.read(&size)
+	case TinySlice:
+		return d.decodeSlice(int(marker) - TinySlice)
+	case Slice8:
+		length, err := d.int8()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeSlice(int(size))
-	case Slice16Marker:
-		var size uint16
-		err := d.read(&size)
+		return d.decodeSlice(int(length))
+	case Slice16:
+		length, err := d.int16()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeSlice(int(size))
-	case Slice32Marker:
-		var size uint32
-		err := d.read(&size)
+		return d.decodeSlice(int(length))
+	case Slice32:
+		length, err := d.int32()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeSlice(int(size))
-	}
+		return d.decodeSlice(int(length))
 
 	// Maps
-	switch marker {
-	default:
-		if marker >= TinyMapMarker && marker <= TinyMapMarker+0x0F {
-			return d.decodeMap(int(marker) - TinyMapMarker)
-		}
-	case Map8Marker:
-		var size uint8
-		err := d.read(&size)
+	case TinyMap:
+		return d.decodeMap(int(marker) - TinyMap)
+	case Map8:
+		slots, err := d.int8()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeMap(int(size))
-	case Map16Marker:
-		var size uint16
-		err := d.read(&size)
+		return d.decodeMap(int(slots))
+	case Map16:
+		slots, err := d.int16()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeMap(int(size))
-	case Map32Marker:
-		var size uint32
-		err := d.read(&size)
+		return d.decodeMap(int(slots))
+	case Map32:
+		slots, err := d.int32()
 		if err != nil {
 			return nil, err
 		}
-		return d.decodeMap(int(size))
-	}
+		return d.decodeMap(int(slots))
 
 	// Structures
-	switch marker {
-	default:
-		if marker >= TinyStructMarker && marker <= TinyStructMarker+0x0F {
-			return d.decodeStruct()
-		}
-	case Struct8Marker:
-		var size uint8
-		err := d.read(&size)
-		if err != nil {
+	case TinyStruct:
+		return d.decodeStruct()
+	case Struct8:
+		if _, err := d.int8(); err != nil {
 			return nil, err
 		}
 		return d.decodeStruct()
-	case Struct16Marker:
-		var size uint16
-		err := d.read(&size)
-		if err != nil {
+	case Struct16:
+		if _, err := d.int16(); err != nil {
 			return nil, err
 		}
 		return d.decodeStruct()
 	}
-
-	return nil, fmt.Errorf("unrecognized marker byte: %x", marker)
 }
 
 func (d *Decoder) decodeString(size int) (string, error) {
 	if size == 0 {
 		return "", nil
 	}
-	if size <= cap(d.buf) {
-		d.buf = d.buf[0:size]
+	var buf []byte
+	if size <= cap(d.scratch) {
+		buf = d.scratch[0:size]
 	} else {
-		d.buf = make([]byte, size)
+		buf = make([]byte, size)
 	}
-	_, err := io.ReadFull(d.r, d.buf)
+	_, err := io.ReadFull(d.r, buf)
 	if err != nil {
 		return "", err
 	}
-	return string(d.buf), nil
+	return string(buf), nil
 }
 
 func (d *Decoder) decodeSlice(size int) ([]interface{}, error) {
@@ -336,25 +324,24 @@ func (d *Decoder) decodeSlice(size int) ([]interface{}, error) {
 }
 
 func (d *Decoder) decodeMap(size int) (map[string]interface{}, error) {
-	mapp := make(map[string]interface{}, size)
+	m := make(map[string]interface{}, size)
 	for i := 0; i < size; i++ {
-		keyInt, err := d.decode()
+		kv, err := d.decode()
 		if err != nil {
 			return nil, err
+		}
+		key, ok := kv.(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected key type: %T", kv)
 		}
 
 		val, err := d.decode()
 		if err != nil {
 			return nil, err
 		}
-
-		key, ok := keyInt.(string)
-		if !ok {
-			return nil, fmt.Errorf("unexpected key type: %T", keyInt)
-		}
-		mapp[key] = val
+		m[key] = val
 	}
-	return mapp, nil
+	return m, nil
 }
 
 func (d *Decoder) decodeStruct() (interface{}, error) {

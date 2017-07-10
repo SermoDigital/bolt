@@ -1,24 +1,30 @@
 package bolt
 
 import (
-	"bytes"
+	"context"
 	"database/sql/driver"
-	"errors"
-	"fmt"
 
-	"github.com/sermodigital/bolt/encoding"
 	"github.com/sermodigital/bolt/structures/messages"
 )
 
-type boltStmt struct {
+var (
+	_ driver.Stmt             = (*stmt)(nil)
+	_ driver.StmtExecContext  = (*stmt)(nil)
+	_ driver.StmtQueryContext = (*stmt)(nil)
+)
+
+type stmt struct {
 	conn   *conn
 	query  string
-	md     map[string]interface{}
 	closed bool
+
+	// maybeConv is either an empty struct (> Go 1.9) or a type that causes
+	// stmt to implement driver.ColumnConverter (< Go 1.8).
+	maybeConv
 }
 
-// Close Closes the statement.
-func (s *boltStmt) Close() error {
+// Close closes the statement and helps implement driver.Stmt.
+func (s *stmt) Close() error {
 	if s.closed {
 		return nil
 	}
@@ -29,150 +35,114 @@ func (s *boltStmt) Close() error {
 	return nil
 }
 
-// NumInput returns the number of placeholder parameters. See sql/driver.Stmt.
-// Currently will always return -1
-func (s *boltStmt) NumInput() int {
-	return -1 // TODO: would need a cypher parser for this. disable for now
+// NumInput returns the number of placeholder parameters. It currently returns
+// -1, indicating the number of input placeholders is unknown.
+func (s *stmt) NumInput() int {
+	return -1 // TODO: need a cypher parser for this.
 }
 
-func (s *boltStmt) exec(args map[string]interface{}) error {
-	resp, err := s.conn.sendRunPullAllConsumeRun(s.query, args)
-	if err != nil {
-		s.closed = true
-		return err
-	}
-
-	success, ok := resp.(messages.Success)
-	if !ok {
-		s.closed = true
-		return fmt.Errorf("unexpected response querying neo from connection: %#v", resp)
-	}
-
-	s.md = success.Metadata
-	return nil
-}
-
-type sqlStmt struct {
-	*boltStmt
-
-	conv genericConv
-}
-
-// genericConv implements driver.ValueConverter to allow the sql.DB interface
-// to work with bolt.
-type genericConv struct {
-	b     *bytes.Buffer
-	e     *encoding.Encoder
-	ismap bool
-	idx   int
-}
-
-// encode returns an encoded v and any errors that may have occurred.
-func (g *genericConv) encode(v interface{}) ([]byte, error) {
-	if g.b == nil {
-		g.b = new(bytes.Buffer)
-	}
-	if g.e == nil {
-		g.e = encoding.NewEncoder(g.b)
-	}
-	err := g.e.Encode(v)
+// Exec helps implement driver.Stmt.
+func (s *stmt) Exec(args []driver.Value) (driver.Result, error) {
+	params, err := driverArgsToMap2(args)
 	if err != nil {
 		return nil, err
 	}
-	m := make([]byte, g.b.Len())
-	copy(m, g.b.Bytes())
-	g.b.Reset()
-	return m, nil
+	return s.exec(context.Background(), params)
 }
 
-// ConvertValue implements driver.ValueConverter.
-func (g *genericConv) ConvertValue(v interface{}) (driver.Value, error) {
-	if g.idx == 0 {
-		m, ok := v.(map[string]interface{})
-		if ok {
-			g.ismap = true
-			return g.encode(m)
-		}
-	}
-	// If our first value was a map then we've finished and any new values are
-	// an error.
-	if g.ismap {
-		return nil, errors.New("if value #0 is map[string]interface{} no other values are allowed")
-	}
-	// Even entries should be strings (keys).
-	if g.idx%2 == 0 {
-		key, ok := v.(string)
-		if !ok {
-			return nil, errors.New("even values must be string keys")
-		}
-		return key, nil
-	}
-	// Odd entries can be anything. The sql package handles the driver.Valuer
-	// case for us. If v is a valid driver.Value return it. Otherwise, use
-	// bolt's encoding and return it as a []byte.
-	//
-	// TODO: is there something more efficient?
-	if driver.IsValue(v) {
-		return v, nil
-	}
-	return g.encode(v)
-}
-
-// ColumnConverter implements driver.ColumnConverter.
-func (s *sqlStmt) ColumnConverter(idx int) driver.ValueConverter {
-	s.conv.idx = idx
-	return &s.conv
-}
-
-// Exec executes a query that returns no rows. See sql/driver.Stmt.
-// You must bolt encode a map to pass as []bytes for the driver value
-func (s *sqlStmt) Exec(args []driver.Value) (driver.Result, error) {
+// ExecContext implements driver.StmtExecContext.
+func (s *stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
 	params, err := driverArgsToMap(args)
 	if err != nil {
 		return nil, err
 	}
-	return s.boltStmt.Exec(params)
+	return s.exec(ctx, params)
 }
 
-// ExecNeo executes a query that returns no rows.
-func (s *boltStmt) Exec(params map[string]interface{}) (Result, error) {
+type result struct {
+	*Counters
+}
+
+// LastInsertId returns -1, nil. It helps implement driver.Result.
+func (r result) LastInsertId() (int64, error) {
+	// TODO: Is this possible?
+	return -1, nil
+}
+
+// exec is the common implementation of Exec and ExecContext.
+func (s *stmt) exec(ctx context.Context, args map[string]interface{}) (driver.Result, error) {
 	if s.closed {
-		return nil, errors.New("Neo4j Bolt statement already closed")
+		return nil, ErrStatementClosed
 	}
-	err := s.exec(params)
+
+	_, err := s.pull(ctx, args)
 	if err != nil {
 		return nil, err
 	}
+
+	// Discard any results.
 	_, pull, err := s.conn.consumeAll()
 	if err != nil {
 		return nil, err
 	}
+
 	success, ok := pull.(messages.Success)
 	if !ok {
-		return nil, fmt.Errorf("Unrecognized response when discarding exec rows: %#v", pull)
+		return nil, UnrecognizedResponseErr{v: pull}
 	}
-	return boltResult{metadata: success.Metadata}, nil
+
+	sum := fromContext(ctx)
+	sum.parseSuccess(success.Metadata)
+	return result{Counters: &sum.Counters}, nil
 }
 
-// Query executes a query that returns data. See sql/driver.Stmt.
-// You must bolt encode a map to pass as []bytes for the driver value
-func (s *sqlStmt) Query(args []driver.Value) (driver.Rows, error) {
+// Query helps implement driver.Stmt.
+func (s *stmt) Query(args []driver.Value) (driver.Rows, error) {
+	params, err := driverArgsToMap2(args)
+	if err != nil {
+		return nil, err
+	}
+	return s.runquery(context.Background(), params)
+}
+
+// QueryContext implements driver.StmtQueryContext.
+func (s *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	params, err := driverArgsToMap(args)
 	if err != nil {
 		return nil, err
 	}
-	err = s.exec(params)
-	if err != nil {
-		return nil, err
-	}
-	return &boltRows{conn: s.conn, md: s.md}, nil
+	return s.runquery(ctx, params)
 }
 
-// Query executes a query that returns data.
-func (s *boltStmt) Query(params map[string]interface{}) (rows, error) {
-	err := s.exec(params)
+// runquery is the common implementation of Query and QueryContext. Its naming
+// is different because stmt has a query member.
+func (s *stmt) runquery(ctx context.Context, args map[string]interface{}) (driver.Rows, error) {
+	if s.closed {
+		return nil, ErrStatementClosed
+	}
+	cols, err := s.pull(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	return &boltRows{conn: s.conn, md: s.md}, nil
+	return &rows{conn: s.conn, cols: cols}, nil
+}
+
+// pull executes a query and returns any errors that occur. It does not pull
+// any results other than the 'RUN' command.
+func (s *stmt) pull(ctx context.Context, args map[string]interface{}) ([]string, error) {
+	resp, err := s.conn.sendRunPullAllConsumeRun(s.query, args)
+	if err != nil {
+		s.closed = true
+		return nil, err
+	}
+	success, ok := resp.(messages.Success)
+	if !ok {
+		s.closed = true
+		return nil, UnrecognizedResponseErr{v: resp}
+	}
+	md := success.Metadata
+	sum := fromContext(ctx)
+	sum.parseSuccess(md)
+	sum.Query = s.query
+	return parseCols(md), nil
 }

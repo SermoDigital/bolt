@@ -1,6 +1,8 @@
 package bolt
 
 import (
+	"bufio"
+	"context"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -14,39 +16,14 @@ import (
 
 // ErrInFailedTransaction is returned when an operation is attempted inside
 // a failed transaction.
-var ErrInFailedTransaction = errors.New("bolt: Could not complete operation in a failed transaction")
+var ErrInFailedTransaction = errors.New("bolt: operation inside failed transaction")
 
-func errBadResp(action string, v interface{}) error {
-	return fmt.Errorf("unrecognized response while %s: %#v", action, v)
-}
+// ErrStatementClosed is returned when an operation is attempted on a closed
+// statement.
+var ErrStatementClosed = errors.New("bolt: statement is closed")
 
-// Conn is a connection to Neo4J. It's interface is similar to that of sql.DB,
-// with some minor modifications for ease of use. In particular, the variadic
-// arguments in Query, Exec, etc. have been replaced with map[string]interface{}.
-type Conn interface {
-	// Prepare returns a prepared statement, bound to this connection.
-	Prepare(query string) (stmt, error)
-
-	// Query queries using the Neo4j-specific interface.
-	Query(query string, params map[string]interface{}) (rows, error)
-
-	// Exec executes a query using the Neo4j-specific interface.
-	Exec(query string, params map[string]interface{}) (Result, error)
-
-	// Close closes the current connection, invalidating any transactions
-	// and statements.
-	Close() error
-
-	// Begin starts a new transaction.
-	Begin() (driver.Tx, error)
-
-	// SetChunkSize sets the maximum chunk size for writes to Neo4j.
-	SetChunkSize(uint16)
-
-	// SetTimeout sets the read and write timeouts for the connection.
-	SetTimeout(time.Duration)
-}
-
+// status indicates the state of a conn, particularly whether it's in a
+// (potentially failed) transcation or not.
 type status uint8
 
 const (
@@ -57,9 +34,10 @@ const (
 
 type conn struct {
 	conn net.Conn
+	buf  *bufio.Reader
 
-	// dec and enc should not be used outright--use the decode and encode
-	// methods instead
+	// dec and enc should not be used outright. The decode and encode methods
+	// should be used instead.
 	dec *encoding.Decoder
 	enc *encoding.Encoder
 
@@ -67,6 +45,149 @@ type conn struct {
 	size    uint16
 	status  status
 	bad     bool
+}
+
+var (
+	_ driver.Queryer            = (*conn)(nil)
+	_ driver.Execer             = (*conn)(nil)
+	_ driver.QueryerContext     = (*conn)(nil)
+	_ driver.ExecerContext      = (*conn)(nil)
+	_ driver.Conn               = (*conn)(nil)
+	_ driver.ConnBeginTx        = (*conn)(nil)
+	_ driver.ConnPrepareContext = (*conn)(nil)
+)
+
+// Query implements driver.Queryer.
+func (c *conn) Query(query string, args []driver.Value) (driver.Rows, error) {
+	params, err := driverArgsToMap2(args)
+	if err != nil {
+		return nil, err
+	}
+	return c.query(context.Background(), query, params)
+}
+
+// QueryContext implements driver.QueryerContext.
+func (c *conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	params, err := driverArgsToMap(args)
+	if err != nil {
+		return nil, err
+	}
+	return c.query(ctx, query, params)
+}
+
+// query is the common implementation of Query and QueryContext.
+func (c *conn) query(ctx context.Context, query string, args map[string]interface{}) (driver.Rows, error) {
+	if c.bad {
+		return nil, driver.ErrBadConn
+	}
+	s := &stmt{conn: c, query: query}
+	defer s.Close()
+	return s.runquery(ctx, args)
+}
+
+// Exec implements driver.Execer.
+func (c *conn) Exec(query string, args []driver.Value) (driver.Result, error) {
+	params, err := driverArgsToMap2(args)
+	if err != nil {
+		return nil, err
+	}
+	return c.exec(context.Background(), query, params)
+}
+
+// ExecContext implements driver.ExecerContext.
+func (c *conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	params, err := driverArgsToMap(args)
+	if err != nil {
+		return nil, err
+	}
+	return c.exec(ctx, query, params)
+}
+
+// exec is the common implementation of Exec and ExecContext.
+func (c *conn) exec(ctx context.Context, query string, args map[string]interface{}) (driver.Result, error) {
+	if c.bad {
+		return nil, driver.ErrBadConn
+	}
+	s := &stmt{conn: c, query: query}
+	defer s.Close()
+	return s.exec(ctx, args)
+}
+
+// Prepare helps implement driver.Conn.
+func (c *conn) Prepare(query string) (driver.Stmt, error) {
+	return c.PrepareContext(context.Background(), query)
+}
+
+// PrepareContext implements driver.ConnPrepareContext.
+func (c *conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	if c.bad {
+		return nil, driver.ErrBadConn
+	}
+	return &stmt{conn: c, query: query}, nil
+}
+
+// Close closes the connection. It helps implement driver.Conn.
+func (c *conn) Close() error {
+	if c.bad {
+		return driver.ErrBadConn
+	}
+	c.status = statusIdle
+	err := c.conn.Close()
+	c.bad = err == nil
+	return err
+}
+
+// Begin begins a new transaction. It helps implement driver.Conn.
+func (c *conn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+// BeginTx implements driver.ConnBeginTx.
+func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if c.bad {
+		return nil, driver.ErrBadConn
+	}
+	if err := c.checktx(false); err != nil {
+		return nil, err
+	}
+	if err := c.transac(begin); err != nil {
+		return nil, err
+	}
+	c.status = statusInTx
+	return c, nil
+}
+
+// Commit commits and closes the transaction. It helps implement driver.Tx.
+func (c *conn) Commit() error {
+	if c.bad {
+		return driver.ErrBadConn
+	}
+	if err := c.checktx(true); err != nil {
+		return err
+	}
+	if c.status == statusInBadTx {
+		if err := c.Rollback(); err != nil {
+			return err
+		}
+		return ErrInFailedTransaction
+	}
+	return c.transac(commit)
+}
+
+// Rollback rolls back and closes the transaction. It helps implement driver.Tx.
+func (c *conn) Rollback() error {
+	if c.bad {
+		return driver.ErrBadConn
+	}
+
+	if err := c.checktx(true); err != nil {
+		return err
+	}
+	if err := c.transac(rollback); err != nil {
+		return err
+	}
+	c.status = statusIdle
+	return nil
 }
 
 // decode returns the next message from the connection if it exists. It returns
@@ -97,87 +218,74 @@ func newConn(netcn net.Conn, v values) (*conn, error) {
 		return nil, err
 	}
 
-	c := &conn{conn: netcn, timeout: timeout, size: encoding.DefaultChunkSize}
-	if err := c.handShake(); err != nil {
-		if e := c.Close(); e != nil {
-			return nil, e
-		}
-		return nil, err
+	c := &conn{
+		conn:    netcn,
+		buf:     bufio.NewReader(netcn),
+		timeout: timeout,
+		size:    encoding.DefaultChunkSize,
+	}
+	if err := c.handshake(); err != nil {
+		return nil, multi(err, c.Close())
 	}
 
 	resp, err := c.sendInit(v.get("username"), v.get("password"))
 	if err != nil {
-		if e := c.Close(); e != nil {
-			return nil, e
-		}
-		return nil, err
+		return nil, multi(err, c.Close())
 	}
 
 	_, ok := resp.(messages.Success)
 	if !ok {
-		if e := c.Close(); e != nil {
-			return nil, e
-		}
-		return nil, fmt.Errorf("unrecognized response from the server: %#v", resp)
+		return nil, multi(
+			UnrecognizedResponseErr{v: resp},
+			c.Close(),
+		)
 	}
 	return c, nil
 }
 
 // handshake completes the bolt protocol's version handshake.
-func (c *conn) handShake() error {
-	_, err := c.Write(handShake)
+func (c *conn) handshake() error {
+	_, err := c.Write(handshake[:])
 	if err != nil {
 		return err
 	}
-	var vers [4]byte
+	var vers version
 	_, err = io.ReadFull(c, vers[:])
 	if err != nil {
 		return err
 	}
-	if vers == noVersionSupported {
-		return fmt.Errorf("server responded with no supported version")
+	if vers == noSupportedVersions {
+		return errors.New("server does not support any versions")
 	}
 	return nil
 }
 
 // Read implements io.Reader with conn's timeout.
-func (c *conn) Read(b []byte) (n int, err error) {
+func (c *conn) Read(p []byte) (n int, err error) {
 	if c.timeout != 0 {
 		err = c.conn.SetReadDeadline(time.Now().Add(c.timeout))
 		if err != nil {
 			return 0, err
 		}
 	}
-	return c.conn.Read(b)
+	return c.buf.Read(p)
 }
 
 // Write implements io.Writer with conn's timeout.
-func (c *conn) Write(b []byte) (n int, err error) {
+func (c *conn) Write(p []byte) (n int, err error) {
 	if c.timeout != 0 {
 		err = c.conn.SetWriteDeadline(time.Now().Add(c.timeout))
 		if err != nil {
 			return 0, err
 		}
 	}
-	return c.conn.Write(b)
-}
-
-// Close closes the connection.
-func (c *conn) Close() error {
-	if c.bad {
-		return driver.ErrBadConn
-	}
-	c.status = statusIdle
-	err := c.conn.Close()
-	c.bad = err == nil
-	return err
+	return c.conn.Write(p)
 }
 
 // ackFailure responds to a failure message allowing the connection to proceed.
 // https://github.com/neo4j-contrib/boltkit/blob/b2739a15871aae8469363b0298f8765a4ec77a9a/boltkit/driver.py#L662
 func (c *conn) ackFailure() error {
-	err := c.encode(messages.AckFailure{})
-	if err != nil {
+	if err := c.encode(messages.AckFailure{}); err != nil {
 		return err
 	}
 
@@ -195,17 +303,18 @@ func (c *conn) ackFailure() error {
 		case messages.Failure:
 			return c.reset()
 		default:
-			c.Close()
-			return fmt.Errorf("got unrecognized response from acking failure: %#v ", resp)
+			return multi(
+				UnrecognizedResponseErr{v: resp},
+				c.Close(),
+			)
 		}
 	}
 }
 
 // reset clears the connection.
-// https://github.com/neo4j-contrib/boltkit/blob/b2739a15871aae8469363b0298f8765a4ec77a9a/boltkit/driver.py#L672
+// https://github.com/neo4j-contrib/boltkit/blob/c81e36a602a44c6fc64e4a088cfed3b2a2449329/boltkit/driver.py#L672
 func (c *conn) reset() error {
-	err := c.encode(messages.Reset{})
-	if err != nil {
+	if err := c.encode(messages.Reset{}); err != nil {
 		return err
 	}
 
@@ -221,25 +330,17 @@ func (c *conn) reset() error {
 		case messages.Success:
 			return nil
 		case messages.Failure:
-			c.Close()
-			return fmt.Errorf("error resetting session: %#v ", resp)
+			return multi(
+				fmt.Errorf("error resetting session: %#v ", resp),
+				err,
+			)
 		default:
-			c.Close()
-			return fmt.Errorf("got unrecognized response from resetting session: %#v ", resp)
+			return multi(
+				UnrecognizedResponseErr{v: resp},
+				c.Close(),
+			)
 		}
 	}
-}
-
-// Prepare prepares a new statement for a query.
-func (c *conn) Prepare(query string) (stmt, error) {
-	return c.prepare(query)
-}
-
-func (c *conn) prepare(query string) (*boltStmt, error) {
-	if c.bad {
-		return nil, driver.ErrBadConn
-	}
-	return &boltStmt{conn: c, query: query}, nil
 }
 
 type txQuery string
@@ -250,16 +351,17 @@ const (
 	rollback txQuery = "ROLLBACK"
 )
 
-func (t txQuery) verb() string {
+func (t txQuery) String() string {
+	const tx = "transaction"
 	switch t {
 	case begin:
-		return "beginning"
+		return "beginning " + tx
 	case commit:
-		return "committing"
+		return "committing " + tx
 	case rollback:
-		return "rolling back"
+		return "rolling back " + tx
 	default:
-		return "unknown"
+		return string(t)
 	}
 }
 
@@ -267,24 +369,25 @@ func (t txQuery) verb() string {
 func (c *conn) transac(query txQuery) error {
 	switch query {
 	case begin, commit, rollback:
+		// OK
 	default:
-		return fmt.Errorf("invalid transaction query: %q", query)
+		return fmt.Errorf("bug: invalid transaction query: %s", query)
 	}
 
-	sifc, pifc, err := c.sendRunPullAllConsumeSingle(string(query), nil)
+	run, pull, err := c.sendRunPullAllConsumeSingle(string(query), nil)
 	if err != nil {
 		return err
 	}
 
-	success, ok := sifc.(messages.Success)
+	_, ok := run.(messages.Success)
 	if !ok {
-		return errBadResp(query.verb()+" transaction", success)
+		return UnrecognizedResponseErr{v: run}
 	}
 
-	pull, ok := pifc.(messages.Success)
+	_, ok = pull.(messages.Success)
 	if !ok {
 		c.status = statusInBadTx
-		return errBadResp("pulling transaction response", pull)
+		return UnrecognizedResponseErr{v: pull}
 	}
 	return nil
 }
@@ -297,78 +400,14 @@ func (c *conn) checktx(intx bool) error {
 	return nil
 }
 
-// Begin begins a new transaction with the Neo4J Database
-func (c *conn) Begin() (driver.Tx, error) {
-	if c.bad {
-		return nil, driver.ErrBadConn
-	}
-	err := c.checktx(false)
-	if err != nil {
-		return nil, err
-	}
-	err = c.transac(begin)
-	if err != nil {
-		return nil, err
-	}
-	c.status = statusInTx
-	return c, nil
-}
-
-// Commit commits and closes the transaction.
-func (c *conn) Commit() error {
-	if c.bad {
-		return driver.ErrBadConn
-	}
-	err := c.checktx(true)
-	if err != nil {
-		return err
-	}
-	if c.status == statusInBadTx {
-		if err := c.Rollback(); err != nil {
-			return err
-		}
-		return ErrInFailedTransaction
-	}
-	return c.transac(commit)
-}
-
-// Rollback rolls back and closes the transaction
-func (c *conn) Rollback() error {
-	if c.bad {
-		return errors.New("transaction already closed")
-	}
-	err := c.checktx(true)
-	if err != nil {
-		return err
-	}
-	err = c.transac(rollback)
-	if err != nil {
-		return err
-	}
-	c.status = statusIdle
-	return nil
-}
-
-// Sets the size of the chunks to write to the stream
+// SetChunkSize sets the size of the chunks that are written to the connection.
 func (c *conn) SetChunkSize(chunkSize uint16) {
 	c.size = chunkSize
 }
 
-// Sets the timeout for reading and writing to the stream
+// SetTimeout sets the timeout for reading and writing to the connection.
 func (c *conn) SetTimeout(timeout time.Duration) {
 	c.timeout = timeout
-}
-
-func (c *conn) query(query string, args map[string]interface{}) (*boltRows, error) {
-	if c.bad {
-		return nil, driver.ErrBadConn
-	}
-	stmt := &boltStmt{conn: c, query: query}
-	err := stmt.exec(args)
-	if err != nil {
-		return nil, err
-	}
-	return &boltRows{conn: c, md: stmt.md}, nil
 }
 
 // consume returns the next value from the connection, acknowledging any
@@ -379,8 +418,7 @@ func (c *conn) consume() (interface{}, error) {
 		return resp, err
 	}
 	if fail, ok := resp.(messages.Failure); ok {
-		err := c.ackFailure()
-		if err != nil {
+		if err := c.ackFailure(); err != nil {
 			return nil, err
 		}
 		return fail, nil
@@ -419,8 +457,7 @@ func (c *conn) consumeAllMultiple(mult int) ([][]interface{}, []interface{}, err
 
 func (c *conn) sendInit(user, pass string) (interface{}, error) {
 	initMessage := messages.NewInitMessage(ClientID, user, pass)
-	err := c.encode(initMessage)
-	if err != nil {
+	if err := c.encode(initMessage); err != nil {
 		return nil, err
 	}
 	return c.consume()
@@ -450,16 +487,14 @@ func (c *conn) pullAllConsume() (interface{}, error) {
 }
 
 func (c *conn) sendRunPullAll(query string, args map[string]interface{}) error {
-	err := c.run(query, args)
-	if err != nil {
+	if err := c.run(query, args); err != nil {
 		return err
 	}
 	return c.pullAll()
 }
 
 func (c *conn) sendRunPullAllConsumeRun(query string, args map[string]interface{}) (interface{}, error) {
-	err := c.sendRunPullAll(query, args)
-	if err != nil {
+	if err := c.sendRunPullAll(query, args); err != nil {
 		return nil, err
 	}
 	return c.consume()

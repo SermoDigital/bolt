@@ -1,5 +1,10 @@
 package graph
 
+import (
+	"database/sql"
+	"fmt"
+)
+
 const (
 	// NodeSignature is the signature byte for a Node object
 	NodeSignature = 0x4E
@@ -25,3 +30,14 @@ func (n Node) Fields() []interface{} {
 	}
 	return []interface{}{n.NodeIdentity, labels, n.Properties}
 }
+
+func (n *Node) Scan(val interface{}) error {
+	n0, ok := val.(Node)
+	if !ok {
+		return fmt.Errorf("Node.Scan: unknown type: %T", val)
+	}
+	*n = n0
+	return nil
+}
+
+var _ sql.Scanner = (*Node)(nil)

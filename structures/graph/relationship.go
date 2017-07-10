@@ -1,5 +1,10 @@
 package graph
 
+import (
+	"database/sql"
+	"fmt"
+)
+
 const (
 	// RelationshipSignature is the signature byte for a Relationship object
 	RelationshipSignature = 0x52
@@ -23,3 +28,14 @@ func (r Relationship) Signature() uint8 {
 func (r Relationship) Fields() []interface{} {
 	return []interface{}{r.RelIdentity, r.StartNodeIdentity, r.EndNodeIdentity, r.Type, r.Properties}
 }
+
+func (r *Relationship) Scan(val interface{}) error {
+	r0, ok := val.(Relationship)
+	if !ok {
+		return fmt.Errorf("Relationship.Scan: unknown type: %T", val)
+	}
+	*r = r0
+	return nil
+}
+
+var _ sql.Scanner = (*Relationship)(nil)
