@@ -32,7 +32,7 @@ var noSupportedVersions = version{0x00, 0x00, 0x00, 0x00}
 
 const (
 	// Version is the current version of this driver
-	Version = "3.0"
+	Version = "3.1"
 
 	// ClientID is the id of this client
 	ClientID = "SermoDigitalBolt/" + Version

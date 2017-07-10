@@ -48,13 +48,9 @@ type conn struct {
 }
 
 var (
-	_ driver.Queryer            = (*conn)(nil)
-	_ driver.Execer             = (*conn)(nil)
-	_ driver.QueryerContext     = (*conn)(nil)
-	_ driver.ExecerContext      = (*conn)(nil)
-	_ driver.Conn               = (*conn)(nil)
-	_ driver.ConnBeginTx        = (*conn)(nil)
-	_ driver.ConnPrepareContext = (*conn)(nil)
+	_ driver.Queryer = (*conn)(nil)
+	_ driver.Execer  = (*conn)(nil)
+	_ driver.Conn    = (*conn)(nil)
 )
 
 // Query implements driver.Queryer.
@@ -64,15 +60,6 @@ func (c *conn) Query(query string, args []driver.Value) (driver.Rows, error) {
 		return nil, err
 	}
 	return c.query(context.Background(), query, params)
-}
-
-// QueryContext implements driver.QueryerContext.
-func (c *conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	params, err := driverArgsToMap(args)
-	if err != nil {
-		return nil, err
-	}
-	return c.query(ctx, query, params)
 }
 
 // query is the common implementation of Query and QueryContext.
@@ -92,15 +79,6 @@ func (c *conn) Exec(query string, args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 	return c.exec(context.Background(), query, params)
-}
-
-// ExecContext implements driver.ExecerContext.
-func (c *conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	params, err := driverArgsToMap(args)
-	if err != nil {
-		return nil, err
-	}
-	return c.exec(ctx, query, params)
 }
 
 // exec is the common implementation of Exec and ExecContext.
@@ -139,11 +117,11 @@ func (c *conn) Close() error {
 
 // Begin begins a new transaction. It helps implement driver.Conn.
 func (c *conn) Begin() (driver.Tx, error) {
-	return c.BeginTx(context.Background(), driver.TxOptions{})
+	return c.begin()
 }
 
-// BeginTx implements driver.ConnBeginTx.
-func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+// begin is the implementaiton of Begin and BeginTx.
+func (c *conn) begin() (driver.Tx, error) {
 	if c.bad {
 		return nil, driver.ErrBadConn
 	}

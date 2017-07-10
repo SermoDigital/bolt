@@ -7,11 +7,7 @@ import (
 	"github.com/sermodigital/bolt/structures/messages"
 )
 
-var (
-	_ driver.Stmt             = (*stmt)(nil)
-	_ driver.StmtExecContext  = (*stmt)(nil)
-	_ driver.StmtQueryContext = (*stmt)(nil)
-)
+var _ driver.Stmt = (*stmt)(nil)
 
 type stmt struct {
 	conn   *conn
@@ -48,15 +44,6 @@ func (s *stmt) Exec(args []driver.Value) (driver.Result, error) {
 		return nil, err
 	}
 	return s.exec(context.Background(), params)
-}
-
-// ExecContext implements driver.StmtExecContext.
-func (s *stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	params, err := driverArgsToMap(args)
-	if err != nil {
-		return nil, err
-	}
-	return s.exec(ctx, params)
 }
 
 type result struct {
@@ -103,15 +90,6 @@ func (s *stmt) Query(args []driver.Value) (driver.Rows, error) {
 		return nil, err
 	}
 	return s.runquery(context.Background(), params)
-}
-
-// QueryContext implements driver.StmtQueryContext.
-func (s *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	params, err := driverArgsToMap(args)
-	if err != nil {
-		return nil, err
-	}
-	return s.runquery(ctx, params)
 }
 
 // runquery is the common implementation of Query and QueryContext. Its naming

@@ -204,10 +204,10 @@ func (r *Recorder) load() error {
 	r.ensureName()
 	path := filepath.Join("recordings", r.Name+".json")
 	file, err := os.OpenFile(path, os.O_RDONLY, 0660)
-	if os.IsNotExist(err) {
-		return nil
-	}
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	defer file.Close()

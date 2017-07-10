@@ -11,8 +11,9 @@ services:
   - neo4j
 
 go:
-  - 1.6
   - 1.7
+  - 1.8
+  - 1.9
   - tip
 
-script: RECORD_OUTPUT=1 NEO4J_BOLT=bolt://neo4j:neo4j@localhost:7687 go test -v ./... 
+script: NEO4J_BOLT=bolt://neo4j:neo4j@localhost:7687 go test -v ./... 
