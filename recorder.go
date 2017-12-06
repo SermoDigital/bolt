@@ -66,11 +66,6 @@ func (r *Recorder) Open(name string) (driver.Conn, error) {
 	return newConn(r, v)
 }
 
-func (r *Recorder) completedLast() bool {
-	event := r.lastEvent()
-	return event == nil || event.Completed
-}
-
 func (r *Recorder) lastEvent() *Event {
 	if len(r.events) > 0 {
 		return r.events[len(r.events)-1]

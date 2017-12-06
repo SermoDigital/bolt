@@ -48,18 +48,34 @@ type conn struct {
 }
 
 var (
-	_ driver.Queryer = (*conn)(nil)
-	_ driver.Execer  = (*conn)(nil)
-	_ driver.Conn    = (*conn)(nil)
+	_ driver.Conn               = (*conn)(nil)
+	_ driver.QueryerContext     = (*conn)(nil)
+	_ driver.ExecerContext      = (*conn)(nil)
+	_ driver.ConnBeginTx        = (*conn)(nil)
+	_ driver.ConnPrepareContext = (*conn)(nil)
 )
 
-// Query implements driver.Queryer.
-func (c *conn) Query(query string, args []driver.Value) (driver.Rows, error) {
-	params, err := driverArgsToMap2(args)
+// QueryContext implements driver.QueryerContext.
+func (c *conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	params, err := driverArgsToMap(args)
 	if err != nil {
 		return nil, err
 	}
-	return c.query(context.Background(), query, params)
+	return c.query(ctx, query, params)
+}
+
+// ExecContext implements driver.ExecerContext.
+func (c *conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	params, err := driverArgsToMap(args)
+	if err != nil {
+		return nil, err
+	}
+	return c.exec(ctx, query, params)
+}
+
+// BeginTx implements driver.ConnBeginTx.
+func (c *conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	return c.begin()
 }
 
 // query is the common implementation of Query and QueryContext.
@@ -70,15 +86,6 @@ func (c *conn) query(ctx context.Context, query string, args map[string]interfac
 	s := &stmt{conn: c, query: query}
 	defer s.Close()
 	return s.runquery(ctx, args)
-}
-
-// Exec implements driver.Execer.
-func (c *conn) Exec(query string, args []driver.Value) (driver.Result, error) {
-	params, err := driverArgsToMap2(args)
-	if err != nil {
-		return nil, err
-	}
-	return c.exec(context.Background(), query, params)
 }
 
 // exec is the common implementation of Exec and ExecContext.
@@ -419,20 +426,6 @@ func (c *conn) consumeAll() ([]interface{}, interface{}, error) {
 	}
 }
 
-func (c *conn) consumeAllMultiple(mult int) ([][]interface{}, []interface{}, error) {
-	responses := make([][]interface{}, mult)
-	successes := make([]interface{}, mult)
-	for i := 0; i < mult; i++ {
-		resp, success, err := c.consumeAll()
-		if err != nil {
-			return responses, successes, err
-		}
-		responses[i] = resp
-		successes[i] = success
-	}
-	return responses, successes, nil
-}
-
 func (c *conn) sendInit(user, pass string) (interface{}, error) {
 	initMessage := messages.NewInitMessage(ClientID, user, pass)
 	if err := c.encode(initMessage); err != nil {
@@ -446,22 +439,8 @@ func (c *conn) run(query string, args map[string]interface{}) error {
 	return c.encode(runMessage)
 }
 
-func (c *conn) sendRunConsume(query string, args map[string]interface{}) (interface{}, error) {
-	if err := c.run(query, args); err != nil {
-		return nil, err
-	}
-	return c.consume()
-}
-
 func (c *conn) pullAll() error {
 	return c.encode(messages.NewPullAllMessage())
-}
-
-func (c *conn) pullAllConsume() (interface{}, error) {
-	if err := c.pullAll(); err != nil {
-		return nil, err
-	}
-	return c.consume()
 }
 
 func (c *conn) sendRunPullAll(query string, args map[string]interface{}) error {
@@ -491,47 +470,4 @@ func (c *conn) sendRunPullAllConsumeSingle(query string, args map[string]interfa
 
 	pullSuccess, err := c.consume()
 	return runSuccess, pullSuccess, err
-}
-
-func (c *conn) sendRunPullAllConsumeAll(query string, args map[string]interface{}) (interface{}, interface{}, []interface{}, error) {
-	err := c.sendRunPullAll(query, args)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	runSuccess, err := c.consume()
-	if err != nil {
-		return runSuccess, nil, nil, err
-	}
-
-	records, pullSuccess, err := c.consumeAll()
-	return runSuccess, pullSuccess, records, err
-}
-
-func (c *conn) sendDiscardAll() error {
-	return c.encode(messages.DiscardAll{})
-}
-
-func (c *conn) sendDiscardAllConsume() (interface{}, error) {
-	if err := c.sendDiscardAll(); err != nil {
-		return nil, err
-	}
-	return c.consume()
-}
-
-func (c *conn) sendRunDiscardAll(query string, args map[string]interface{}) error {
-	err := c.run(query, args)
-	if err != nil {
-		return err
-	}
-	return c.sendDiscardAll()
-}
-
-func (c *conn) sendRunDiscardAllConsume(query string, args map[string]interface{}) (interface{}, interface{}, error) {
-	runResp, err := c.sendRunConsume(query, args)
-	if err != nil {
-		return runResp, nil, err
-	}
-	discardResp, err := c.sendDiscardAllConsume()
-	return runResp, discardResp, err
 }

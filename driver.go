@@ -296,11 +296,6 @@ func (v values) get(k string) string {
 	return v[k]
 }
 
-func (v values) has(k string) bool {
-	_, ok := v[k]
-	return ok
-}
-
 // merge adds v2 to v, overwriting any new entries.
 func (v values) merge(v2 values) {
 	for k, vv := range v2 {

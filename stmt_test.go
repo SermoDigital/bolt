@@ -386,14 +386,12 @@ func TestBoltStmt_Discard(t *testing.T) {
 		t.Fatalf("an error occurred preparing statement: %s", err)
 	}
 
-	rows, err := stmt.Query()
-	if err != nil {
+	if _, err := stmt.Query(); err != nil {
 		t.Fatalf("an error occurred querying Neo: %s", err)
 	}
 
 	// Closing stmt should discard stream when it wasn't yet consumed
-	err = stmt.Close()
-	if err != nil {
+	if err := stmt.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -402,7 +400,7 @@ func TestBoltStmt_Discard(t *testing.T) {
 		t.Fatalf("an error occurred preparing statement: %s", err)
 	}
 
-	rows, err = stmt.Query()
+	rows, err := stmt.Query()
 	if err != nil {
 		t.Fatalf("an error occurred querying Neo: %s", err)
 	}

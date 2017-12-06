@@ -3,20 +3,52 @@ package bolt
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 
 	"github.com/sermodigital/bolt/structures/messages"
 )
 
-var _ driver.Stmt = (*stmt)(nil)
+var (
+	_ driver.Stmt             = (*stmt)(nil)
+	_ driver.StmtExecContext  = (*stmt)(nil)
+	_ driver.StmtQueryContext = (*stmt)(nil)
+)
+
+// ErrNotMap is returned when one argument is passed to a Query, Exec, etc.
+// method and its type isn't Map.
+var ErrNotMap = errors.New("bolt: if one argument is passed it must of type Map")
+
+func (s *stmt) CheckNamedValue(v *driver.NamedValue) error {
+	if _, ok := v.Value.(Map); ok || v.Name != "" {
+		return nil
+	}
+	return errors.New("argument name cannot be empty")
+}
+
+var _ driver.NamedValueChecker = (*stmt)(nil)
+
+// ExecContext implements driver.StmtExecContext.
+func (s *stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	params, err := driverArgsToMap(args)
+	if err != nil {
+		return nil, err
+	}
+	return s.exec(ctx, params)
+}
+
+// QueryContext implements driver.StmtQueryContext.
+func (s *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	params, err := driverArgsToMap(args)
+	if err != nil {
+		return nil, err
+	}
+	return s.runquery(ctx, params)
+}
 
 type stmt struct {
 	conn   *conn
 	query  string
 	closed bool
-
-	// maybeConv is either an empty struct (> Go 1.9) or a type that causes
-	// stmt to implement driver.ColumnConverter (< Go 1.8).
-	maybeConv
 }
 
 // Close closes the statement and helps implement driver.Stmt.
