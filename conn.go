@@ -218,8 +218,7 @@ func newConn(netcn net.Conn, v values) (*conn, error) {
 		return nil, multi(err, c.Close())
 	}
 
-	_, ok := resp.(messages.Success)
-	if !ok {
+	if _, ok := resp.(messages.Success); !ok {
 		return nil, multi(
 			UnrecognizedResponseErr{v: resp},
 			c.Close(),
@@ -230,19 +229,21 @@ func newConn(netcn net.Conn, v values) (*conn, error) {
 
 // handshake completes the bolt protocol's version handshake.
 func (c *conn) handshake() error {
-	_, err := c.Write(handshake[:])
-	if err != nil {
+	if _, err := c.Write(handshake[:]); err != nil {
 		return err
 	}
 	var vers version
-	_, err = io.ReadFull(c, vers[:])
-	if err != nil {
+	if _, err := io.ReadFull(c, vers[:]); err != nil {
 		return err
 	}
-	if vers == noSupportedVersions {
+	switch vers {
+	case noSupportedVersions:
 		return errors.New("server does not support any versions")
+	case version1_0:
+		return nil
+	default:
+		return fmt.Errorf("unknown version: %v", vers)
 	}
-	return nil
 }
 
 // Read implements io.Reader with conn's timeout.

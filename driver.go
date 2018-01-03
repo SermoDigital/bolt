@@ -29,10 +29,11 @@ var handshake = [...]byte{
 type version [4]byte
 
 var noSupportedVersions = version{0x00, 0x00, 0x00, 0x00}
+var version1_0 = version{0x00, 0x00, 0x00, 0x01}
 
 const (
 	// Version is the current version of this driver
-	Version = "3.1"
+	Version = "3.3"
 
 	// ClientID is the id of this client
 	ClientID = "SermoDigitalBolt/" + Version
